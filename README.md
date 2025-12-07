@@ -26,9 +26,9 @@ The project is designed to demonstrate the following:
 
 ## Tools/Software Used
 
-1. **Ubuntu 20.04**
+1. **Ubuntu 22.04**
 2. **ROS2 Humble**
-3. **Python**
+3. **Python 3**
 4. **Git**
 5. **DDS (Data Distribution Service)**
 6. **Flask**
