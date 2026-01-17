@@ -46,17 +46,26 @@ def generate_launch_description():
 
     # Get the num_of_robots value from the launch configuration
     num_of_robots = LaunchConfiguration('num_of_robots')
+    
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='true',
+        description='Use simulation (Gazebo) clock if true'
+    )
 
     return LaunchDescription([
-        # Declare the num_of_robots argument
+        # Declare arguments
         num_of_robots_arg,
+        use_sim_time_arg,
 
         # Launch the logger node
         Node(
             package='logger',
             executable='logger',
             name='logger_node',
-            output='screen'
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time}]
         ),
 
         # Launch the fleet_manager node with the num_of_robots parameter
@@ -65,7 +74,7 @@ def generate_launch_description():
             executable='fleet_manager',
             name='fleet_manager_node',
             output='screen',
-            parameters=[{'num_robots': num_of_robots}]
+            parameters=[{'num_robots': num_of_robots}, {'use_sim_time': use_sim_time}]
         ),
 
         # Launch the shared_memory_node
@@ -73,7 +82,8 @@ def generate_launch_description():
             package='shared_memory_node',
             executable='shared_memory_node',
             name='shared_memory_node',
-            output='screen'
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time}]
         ),
 
         # Launch the task_manager_node
@@ -81,6 +91,15 @@ def generate_launch_description():
             package='task_management',
             executable='task_manager_node',
             name='task_manager_node',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time}]
+        ),
+
+        # Launch the Web Server (ROS 2 package)
+        Node(
+            package='web_server',
+            executable='web_server_node',
+            name='web_server_node',
             output='screen'
         ),
     ])

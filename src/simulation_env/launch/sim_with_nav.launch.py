@@ -87,7 +87,7 @@ def generate_launch_description():
         for i in range(int(num_of_robots_env))  # Convert to int for iteration
     ]
 
-    use_sim_time = LaunchConfiguration("use_sim_time", default="false")
+    use_sim_time = LaunchConfiguration("use_sim_time", default="true")
     declare_use_sim_time = DeclareLaunchArgument(
         name="use_sim_time",
         default_value=use_sim_time,
@@ -364,5 +364,14 @@ def generate_launch_description():
         ld.add_action(post_spawn_event)
         ld.add_action(declare_params_file_cmd)
     ######################
+
+    battery_sim_node = Node(
+        package="simulation_env",
+        executable="battery_sim_node",
+        name="battery_sim_node",
+        output="screen",
+        parameters=[{'use_sim_time': True}]
+    )
+    ld.add_action(battery_sim_node)
 
     return ld

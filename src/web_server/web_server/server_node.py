@@ -70,6 +70,8 @@ from flask import Flask, render_template, request, redirect, url_for, jsonify
 import rclpy
 from robot_interfaces.msg import Order, FleetStatus, Product
 from robot_interfaces.srv import GetShelfList, InventoryUpdate
+from robot_interfaces.action import ProcessOrder
+from rclpy.action import ActionClient
 from rclpy.node import Node
 import threading
 from datetime import datetime
@@ -77,6 +79,27 @@ import csv
 import time
 import webbrowser
 import os
+
+# Determine template directory - use share directory if installed, else local
+def get_template_directory():
+    """Find the templates directory, whether running from source or installed."""
+    # First try the ament share directory (installed package)
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share_dir = get_package_share_directory('web_server')
+        installed_templates = os.path.join(share_dir, 'templates')
+        if os.path.exists(installed_templates):
+            return installed_templates
+    except:
+        pass
+    
+    # Fall back to local templates directory (running from source)
+    local_templates = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'templates')
+    if os.path.exists(local_templates):
+        return os.path.abspath(local_templates)
+    
+    # Last resort: current directory
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 
 rclpy.init()
 node = Node('web_server')
@@ -89,13 +112,18 @@ if not os.path.exists(log_dir):
 ORDERS_CSV_FILE = os.path.join(log_dir, "published_orders.csv")
 
 
-publisher = node.create_publisher(Order, '/order_requests', 10)
+# publisher = node.create_publisher(Order, '/order_requests', 10) # Deprecated
+order_action_client = ActionClient(node, ProcessOrder, 'process_order')
 shelf_list_client = node.create_client(GetShelfList, '/get_shelf_list')
 inventory_update_client = node.create_client(InventoryUpdate, '/update_inventory')
 
-app = Flask(__name__)
+# Create Flask app with dynamic template folder
+template_dir = get_template_directory()
+print(f"[INFO] Using templates from: {template_dir}")
+app = Flask(__name__, template_folder=template_dir)
 
 orders = []
+order_statuses = {} # Map order_id -> {"status": "Pending", "progress": 0.0}
 available_shelves = []
 shelf_to_product = {}
 robot_status_data = {}
@@ -145,6 +173,36 @@ def fetch_shelf_data():
             time.sleep(2)
         else:
             print("Service not available, retrying...")
+
+
+def order_feedback_callback(feedback_msg):
+    global order_statuses
+    feedback = feedback_msg.feedback
+    oid = feedback.order_id
+    if oid in order_statuses:
+        order_statuses[oid]["status"] = feedback.status
+        order_statuses[oid]["progress"] = feedback.progress
+    # print(f"[DEBUG] Feedback for Order {oid}: {feedback.status}")
+
+def order_goal_response_callback(future, order_id):
+    goal_handle = future.result()
+    if not goal_handle.accepted:
+        print(f"[DEBUG] Order {order_id} rejected")
+        order_statuses[order_id]["status"] = "Rejected"
+        return
+
+    # print(f"[DEBUG] Order {order_id} accepted")
+    order_statuses[order_id]["status"] = "Accepted"
+    
+    result_future = goal_handle.get_result_async()
+    result_future.add_done_callback(lambda f: order_result_callback(f, order_id))
+
+def order_result_callback(future, order_id):
+    result = future.result().result
+    status = "Completed" if result.success else f"Failed: {result.message}"
+    order_statuses[order_id]["status"] = status
+    order_statuses[order_id]["progress"] = 1.0 if result.success else 0.0
+    print(f"[DEBUG] Order {order_id} finished: {status}")
 
 
 
@@ -219,6 +277,22 @@ def get_inventory():
 @app.route('/get_robot_status')
 def get_robot_status():
     return jsonify(robot_status_data)
+
+@app.route('/get_order_status')
+def get_order_status():
+    combined_status = []
+    # Combine static order info with dynamic status
+    for order in orders:
+        oid = order['order_id']
+        status_info = order_statuses.get(oid, {"status": "Pending", "progress": 0.0})
+        combined_status.append({
+            "order_id": oid,
+            "timestamp": order['timestamp'],
+            "status": status_info['status'],
+            "progress": status_info['progress'],
+            "shelves": order['shelves']
+        })
+    return jsonify(combined_status)
     
 @app.route('/update_inventory', methods=['POST'])
 def update_inventory():
@@ -309,16 +383,28 @@ def submit_order():
 
     order = {'order_id': order_id, 'shelves': shelves, 'timestamp': timestamp}
     orders.append(order)
+    order_statuses[order_id] = {"status": "Pending", "progress": 0.0}
+    
     log_order_to_csv(order)
-    order_msg = Order()
-    order_msg.order_id = order_id
+
+    # Use Action Client
+    goal_msg = ProcessOrder.Goal()
+    goal_msg.order_id = order_id
     for shelf in shelves:
         product = Product()
         product.shelf_id = shelf['shelf_id']
         product.quantity = shelf['quantity']
-        order_msg.product_list.append(product)
+        goal_msg.product_list.append(product)
 
-    publisher.publish(order_msg)
+    if order_action_client.wait_for_server(timeout_sec=10.0):
+        print(f"[DEBUG] Sending Order {order_id} via Action")
+        future = order_action_client.send_goal_async(goal_msg, feedback_callback=order_feedback_callback)
+        future.add_done_callback(lambda f: order_goal_response_callback(f, order_id))
+    else:
+        print("[ERROR] Action Server not available!")
+        order_statuses[order_id]["status"] = "Failed (Server Down)"
+
+    # publisher.publish(order_msg) # Deprecated
 
     return render_template('index.html', 
                            available_shelves=available_shelves, 
@@ -345,20 +431,88 @@ def repeat_order(order_id):
     }
 
     orders.append(new_order)
+    order_statuses[new_order_id] = {"status": "Pending", "progress": 0.0}
     log_order_to_csv(new_order)
     
-    order_msg = Order()
+    # Use Action Client
+    goal_msg = ProcessOrder.Goal()
+    goal_msg.order_id = new_order_id
     for shelf in new_order['shelves']:
         product = Product()
         product.shelf_id = shelf['shelf_id']
         product.quantity = shelf['quantity']
-        order_msg.product_list.append(product)
+        goal_msg.product_list.append(product)
 
-    publisher.publish(order_msg)  
+    if order_action_client.wait_for_server(timeout_sec=10.0):
+        print(f"[DEBUG] Sending Repeated Order {new_order_id} via Action")
+        future = order_action_client.send_goal_async(goal_msg, feedback_callback=order_feedback_callback)
+        future.add_done_callback(lambda f: order_goal_response_callback(f, new_order_id))
+    else:
+        print("[ERROR] Action Server not available!")
+        order_statuses[new_order_id]["status"] = "Failed (Server Down)"
 
-    print(f"[DEBUG] Repeated Order {new_order_id} published: {new_order}")
+    # publisher.publish(order_msg)  
+    # print(f"[DEBUG] Repeated Order {new_order_id} published: {new_order}")
 
     return redirect(url_for('index'))
+
+@app.route('/random_order', methods=['POST'])
+def random_order():
+    """Generates and submits a random order with 1-3 random items."""
+    import random
+    global orders, available_shelves, shelf_to_product
+    
+    # Use already-cached shelf data (updated by background thread)
+    # Don't call fetch_shelf_data() as it's a blocking infinite loop!
+    
+    if not available_shelves:
+        return jsonify({"success": False, "error": "No shelves available"})
+    
+    # Generate random items (1-3 items)
+    num_items = random.randint(1, min(3, len(available_shelves)))
+    selected_shelves = random.sample(available_shelves, num_items)
+    
+    shelves = []
+    for shelf in selected_shelves:
+        if shelf.current_inventory > 0:
+            max_qty = min(shelf.current_inventory, 3)  # Max 3 items per shelf
+            qty = random.randint(1, max_qty)
+            shelves.append({
+                'shelf_id': shelf.shelf_id,
+                'quantity': qty
+            })
+    
+    if not shelves:
+        return jsonify({"success": False, "error": "No inventory available"})
+    
+    # Create order
+    order_id = len(orders) + 1
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    order = {'order_id': order_id, 'shelves': shelves, 'timestamp': timestamp}
+    orders.append(order)
+    order_statuses[order_id] = {"status": "Pending", "progress": 0.0}
+    
+    log_order_to_csv(order)
+    
+    # Use Action Client
+    goal_msg = ProcessOrder.Goal()
+    goal_msg.order_id = order_id
+    for shelf in shelves:
+        product = Product()
+        product.shelf_id = shelf['shelf_id']
+        product.quantity = shelf['quantity']
+        goal_msg.product_list.append(product)
+    
+    if order_action_client.wait_for_server(timeout_sec=5.0):
+        print(f"[DEBUG] Sending Random Order {order_id} via Action: {shelves}")
+        future = order_action_client.send_goal_async(goal_msg, feedback_callback=order_feedback_callback)
+        future.add_done_callback(lambda f: order_goal_response_callback(f, order_id))
+        return jsonify({"success": True, "order_id": order_id, "items": shelves})
+    else:
+        print("[ERROR] Action Server not available!")
+        order_statuses[order_id]["status"] = "Failed (Server Down)"
+        return jsonify({"success": False, "error": "Action server not available"})
 
 def run_flask():
     url = "http://127.0.0.1:5000/"
@@ -373,8 +527,8 @@ def run_ros():
     node.destroy_node()
     rclpy.shutdown()
 
-if __name__ == '__main__':
-
+def main(args=None):
+    """ROS 2 node entry point."""
     flask_thread = threading.Thread(target=run_flask)
     ros_thread = threading.Thread(target=run_ros)
 
@@ -383,3 +537,6 @@ if __name__ == '__main__':
 
     flask_thread.join()
     ros_thread.join()
+
+if __name__ == '__main__':
+    main()

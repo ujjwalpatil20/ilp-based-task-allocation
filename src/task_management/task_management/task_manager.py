@@ -8,6 +8,7 @@ The node interacts with other services and topics to ensure efficient task distr
 ### Responsibilities:
 1. **Order Management**:
    - Subscribes to the `/order_requests` topic to receive new orders.
+   - Hosts `process_order` Action Server to receive orders from Web GUI.
    - Processes orders by assigning tasks to the most suitable robot.
    - Publishes completed orders to the `/end_order` topic.
 
@@ -23,44 +24,6 @@ The node interacts with other services and topics to ensure efficient task distr
 
 4. **Logging**:
    - Publishes logs to the `/central_logs` topic for centralized logging and monitoring.
-
-### Key Features:
-- Uses asynchronous programming with `asyncio` to handle service calls and task processing concurrently.
-- Implements a multi-threaded executor to allow concurrent service calls and callbacks.
-- Maintains an order queue to handle incoming orders sequentially.
-- Dynamically calculates the best robot for a task based on a scoring system.
-
-### Topics:
-- **Subscribed**:
-  - `/order_requests`: Receives new orders.
-- **Published**:
-  - `/end_order`: Publishes completed orders.
-  - `/central_logs`: Publishes logs for monitoring.
-
-### Services:
-- **Clients**:
-  - `/get_robot_fleet_status`: Retrieves the status of all robots.
-  - `/get_shelf_list`: Retrieves the list of shelves and their details.
-  - `/get_drop_off_pose`: Retrieves the drop-off location for completed tasks.
-  - `/task_assignments`: Assigns tasks to robots.
-
-### Methods:
-- `log_to_central(level, message)`: Publishes logs to the central logging topic.
-- `run_asyncio_loop()`: Runs the asyncio event loop in a separate thread.
-- `create_task(coroutine)`: Schedules an asyncio task in the event loop.
-- `order_callback(msg)`: Callback triggered when a new order is received.
-- `process_orders()`: Continuously processes orders from the queue.
-- `process_order(order)`: Processes a single order by calling necessary services and assigning tasks.
-- `call_robot_fleet_service()`: Calls the `/get_robot_fleet_status` service.
-- `call_shelf_list_service()`: Calls the `/get_shelf_list` service.
-- `get_drop_off_pose()`: Calls the `/get_drop_off_pose` service.
-- `allocate_task(robot_fleet_response, shelf_query_response, drop_off_pose, order)`: Allocates a task to the best robot.
-- `get_drop_off_task(robot_id, drop_off_pose)`: Creates a task for the robot to move to the drop-off location.
-- `call_task_assignment_service(task_list)`: Calls the `/task_assignments` service to assign tasks.
-- `calculate_distance(location1, location2)`: Calculates the distance between two locations.
-
-### Execution:
-- The node is initialized and spun using a `MultiThreadedExecutor` to handle concurrent callbacks and service calls.
 """
 
 import rclpy
@@ -68,7 +31,9 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from robot_interfaces.msg import Order, Task, Product, Logs
 from robot_interfaces.srv import ShelfQuery, GetRobotStatus, GetRobotFleetStatus, TaskList, GetShelfList, GetPose
+from robot_interfaces.action import ProcessOrder
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from geometry_msgs.msg import Pose
 from builtin_interfaces.msg import Time
 
@@ -76,9 +41,7 @@ import asyncio
 import math
 from collections import deque
 import threading
-
-from sympy import false
-
+import time
 
 class TaskManager(Node):
     def __init__(self):
@@ -94,6 +57,15 @@ class TaskManager(Node):
         # Publishers
         self.order_end_publisher = self.create_publisher(Order, '/end_order', 10)
         self.log_publisher = self.create_publisher(Logs, '/central_logs', 10)
+
+        # Action Server
+        self._action_server = ActionServer(
+            self,
+            ProcessOrder,
+            'process_order',
+            self.execute_order_action,
+            callback_group=self.callback_group
+        )
 
         # Service clients
         self.shelf_query_client = self.create_client(
@@ -117,6 +89,20 @@ class TaskManager(Node):
         # Order queue
         self.order_queue = deque()
         self.task_id_counter = 1
+        
+        # Track action goals to succeed them later
+        # Map order_id -> goal_handle
+        self.pending_goals = {}
+        
+        # Lock to prevent race conditions in robot assignment
+        self.assignment_lock = asyncio.Lock()
+        
+        # Track robots that are currently assigned (to prevent shared_memory stale data issues)
+        # Set of robot_ids that we've assigned but haven't finished yet
+        self.assigned_robots = set()
+        
+        # Flag to prevent multiple process_orders coroutines
+        self.processing_orders_running = False
 
         # Start the order processing loop in a separate thread
         self.log_to_central("INFO", "Task Manager is ready.")
@@ -146,64 +132,202 @@ class TaskManager(Node):
 
     def order_callback(self, msg):
         """
-        Callback triggered when a new order is received.
+        Callback triggered when a new order is received via Topic.
         Adds the order to the queue.
         """
-        self.log_to_central("INFO", f'Received order request: {msg}')
+        self.log_to_central("INFO", f'Received order request via Topic: {msg.order_id}')
         self.order_queue.append(msg)
         self.create_task(self.process_orders())  # Trigger order processing
 
+    async def execute_order_action(self, goal_handle):
+        """
+        Callback for ProcessOrder Action.
+        Adds order to queue and waits for completion.
+        """
+        self.get_logger().info('Executing order action...')
+        goal = goal_handle.request
+        
+        # Create internal Order message from Goal
+        order_msg = Order()
+        order_msg.order_id = getattr(goal, 'order_id', 0) # Goal might not have it if not set, usually passed
+        if order_msg.order_id == 0:
+             # Generat ID if needed or assum passed
+             import uuid
+             order_msg.order_id = int(uuid.uuid4().int >> 64)
+
+        # Map product list
+        # Goal uses robot_interfaces/Product (shelf_id, quantity)
+        # Msg uses same
+        order_msg.product_list = goal.product_list
+        
+        # Store handle
+        self.pending_goals[order_msg.order_id] = goal_handle
+        
+        self.log_to_central("INFO", f'Received order request via Action: {order_msg.order_id}')
+        self.order_queue.append(order_msg)
+        
+        # Only start process_orders if not already running
+        if not self.processing_orders_running:
+            self.create_task(self.process_orders())
+        
+        # Monitor status
+        # Since this is a coroutine in reentrant group, we can wait
+        feedback_msg = ProcessOrder.Feedback()
+        feedback_msg.order_id = order_msg.order_id
+        feedback_msg.status = "Queued"
+        goal_handle.publish_feedback(feedback_msg)
+        
+        # Polling for completion
+        # Ideally we use an event, but polling map is safe enough here
+        start_time = time.time()
+        while rclpy.ok():
+            if order_msg.order_id not in self.pending_goals:
+                # Removed from map means completed/succeeded or failed
+                # We need a way to know Status.
+                # Assuming success if removed by process_order
+                # Wait, process_order logic needs to access this handle to complete it.
+                # If I remove it there, I can't check it here easily unless I use another flag.
+                # Let's check status directly.
+                break
+                
+            # If still in map, it's pending/processing
+            # We can update feedback if we had status info from process_order
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                del self.pending_goals[order_msg.order_id]
+                return ProcessOrder.Result(success=False, message="Canceled")
+            
+            time.sleep(1.0) # check status every 1s (blocking is ok in MultiThreadedExecutor)
+            
+        # If break loop, it means handled
+        # But wait, if process_order calls succeed(), this function must return Result.
+        # But succeed() is terminal? No, it sets state. We still need to return Result object.
+        return ProcessOrder.Result(success=True, message="Order Processed")
+
+
     async def process_orders(self):
         """
-        Continuously processes orders from the queue.
+        Continuously processes orders from the queue in strict FIFO order.
+        Only one order is processed at a time per robot.
         """
-        self.log_to_central("INFO", "process_orders coroutine started.")  # Debug log
-        while rclpy.ok():
-            if self.order_queue:
-                order = self.order_queue.popleft()
-                self.log_to_central("INFO", f'Processing order: {order}')
-                success = await self.process_order(order)
-                if not success:
-                    await asyncio.sleep(1)
-            else:
-                await asyncio.sleep(1)  # Sleep if the queue is empty
-
-    async def process_order(self, order):
-        """
-        Asynchronously process the order by calling the two services concurrently.
-        """
-
+        self.processing_orders_running = True
         try:
-            # Call the two services concurrently using asyncio.gather
-            robot_fleet_response, shelf_query_response, drop_off_pose = await asyncio.gather(
-                self.call_robot_fleet_service(),
-                self.call_shelf_list_service(),
-                self.get_drop_off_pose()
+            while rclpy.ok():
+                if self.order_queue:
+                    # Peek at the first order (don't remove yet)
+                    order = self.order_queue[0]
+                    self.log_to_central("INFO", f'Processing order: {order.order_id}')
+                    
+                    # Try to find an available robot
+                    robot_fleet_response, shelf_query_response, drop_off_pose = await asyncio.gather(
+                        self.call_robot_fleet_service(),
+                        self.call_shelf_list_service(),
+                        self.get_drop_off_pose()
+                    )
+                    
+                    task_assigned = self.allocate_task(robot_fleet_response, shelf_query_response, drop_off_pose, order)
+                    
+                    if task_assigned:
+                        # Robot found! Remove order from queue and process it
+                        self.order_queue.popleft()
+                        assigned_robot_id = task_assigned[0].robot_id
+                        
+                        # Assign the task
+                        success = await self.call_task_assignment_service(task_assigned)
+                        
+                        if success:
+                            # Mark robot as assigned locally
+                            self.assigned_robots.add(assigned_robot_id)
+                            
+                            # Spawn a separate coroutine to wait for this order's completion
+                            # This allows us to continue processing other orders for other robots
+                            asyncio.create_task(self.wait_for_order_completion(order, assigned_robot_id))
+                        else:
+                            # Task assignment failed - put order back at front
+                            self.order_queue.appendleft(order)
+                            self.log_to_central("WARN", "Task assignment failed, requeueing order.")
+                            await asyncio.sleep(2.0)
+                    else:
+                        # No robot available - send feedback and wait
+                        if order.order_id in self.pending_goals:
+                            fb = ProcessOrder.Feedback()
+                            fb.order_id = order.order_id
+                            fb.status = "Queued: Waiting for Robot"
+                            fb.progress = 0.0
+                            self.pending_goals[order.order_id].publish_feedback(fb)
+                        
+                        # Wait before checking again
+                        await asyncio.sleep(2.0)
+                else:
+                    # Queue empty, exit this coroutine. Will be re-triggered by next order.
+                    return
+        finally:
+            self.processing_orders_running = False
+    
+    async def wait_for_order_completion(self, order, assigned_robot_id):
+        """
+        Waits for a robot to finish navigating and completes the order.
+        Runs as a separate coroutine so queue processing can continue.
+        """
+        # Feedback: Robot assigned, navigation started
+        if order.order_id in self.pending_goals:
+            fb = ProcessOrder.Feedback()
+            fb.order_id = order.order_id
+            fb.status = f"Navigating (Robot {assigned_robot_id})"
+            fb.progress = 0.3
+            self.pending_goals[order.order_id].publish_feedback(fb)
+        
+        # Wait for robot to finish navigation (poll until idle)
+        max_wait = 300  # 5 minutes max
+        wait_time = 0
+        success = False
+        
+        while wait_time < max_wait:
+            await asyncio.sleep(2.0)
+            wait_time += 2
+            
+            # Check robot status
+            fleet_status = await self.call_robot_fleet_service()
+            robot_status = next(
+                (r for r in fleet_status.robot_status_list if r.robot_id == assigned_robot_id), 
+                None
             )
-
-            task_assigned = self.allocate_task(robot_fleet_response, shelf_query_response, drop_off_pose, order)
-
-            if task_assigned:
-                success = await self.call_task_assignment_service(task_assigned)
-                if success:
-                    self.order_end_publisher.publish(order)
-                    return success
-
-                # If task assignment failed, push the order back to the queue
-                self.log_to_central("WARN", "Task assignment failed. Re-queueing order.")
-                self.order_queue.append(order)
-                return False
+            
+            if robot_status and robot_status.is_available:
+                # Robot finished!
+                self.order_end_publisher.publish(order)
+                self.log_to_central("INFO", f"Order {order.order_id} Completed Successfully.")
+                
+                if order.order_id in self.pending_goals:
+                    fb = ProcessOrder.Feedback()
+                    fb.order_id = order.order_id
+                    fb.status = "Completed"
+                    fb.progress = 1.0
+                    self.pending_goals[order.order_id].publish_feedback(fb)
+                
+                success = True
+                break
+            
+            # Update progress feedback periodically
+            progress = min(0.3 + (wait_time / max_wait) * 0.6, 0.9)
+            if order.order_id in self.pending_goals:
+                fb = ProcessOrder.Feedback()
+                fb.order_id = order.order_id
+                fb.status = f"Navigating (Robot {assigned_robot_id})"
+                fb.progress = progress
+                self.pending_goals[order.order_id].publish_feedback(fb)
+        
+        # Remove from local tracking
+        self.assigned_robots.discard(assigned_robot_id)
+        
+        # Complete the action
+        if order.order_id in self.pending_goals:
+            if success:
+                self.pending_goals[order.order_id].succeed()
             else:
-                # If no robot was available, push the order back to the queue
-                self.log_to_central("WARN", "No available robots to assign task. Re-queueing order.")
-                self.order_queue.append(order)
-                return False
-
-        except Exception as e:
-            self.log_to_central("ERROR", f'Error calling services: {e}')
-            # Re-queue the order if an error occurs
-            self.order_queue.append(order)
-            return False
+                self.log_to_central("WARN", f"Order {order.order_id} timed out waiting for robot.")
+                self.pending_goals[order.order_id].abort()
+            del self.pending_goals[order.order_id]
 
     async def call_robot_fleet_service(self):
         """
@@ -258,7 +382,8 @@ class TaskManager(Node):
         shelf_details = shelf_query_response.shelf_status_list
 
         for robot in robot_fleet_list:
-            if robot.is_available:
+            # Check both shared_memory status AND our local tracking
+            if robot.is_available and robot.robot_id not in self.assigned_robots:
                 # Calculate proximity score (distance to shelf)
                 robot_location = robot.current_location
 

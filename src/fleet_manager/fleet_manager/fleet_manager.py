@@ -67,14 +67,24 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Pose, PoseStamped
 from nav2_msgs.action import FollowWaypoints
 from robot_interfaces.msg import RobotStatus, Task, FleetStatus, Logs
-from robot_interfaces.srv import TaskList
+from robot_interfaces.srv import TaskList, GetShelfList, GetPose
+from robot_interfaces.action import ProcessOrder
 import uuid
+import json
+from std_msgs.msg import String
+from rclpy.action import ActionServer, ActionClient, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from builtin_interfaces.msg import Time
 
 class FleetManager(Node):
-    def __init__(self, num_robots):
+    def __init__(self):
         """Initializes the FleetManager node and sets up robots, publishers, and services."""
         super().__init__('fleet_manager')
+
+        self.declare_parameter('num_robots', 2)
+        num_robots = self.get_parameter('num_robots').value
+        self.get_logger().info(f"Initialized FleetManager with {num_robots} robots.")
        
         self.log_publisher = self.create_publisher(Logs, '/central_logs', 10)
 
@@ -110,9 +120,28 @@ class FleetManager(Node):
         # Create a timer to periodically publish fleet status
         self.timer = self.create_timer(1.0, self.publish_fleet_status)
 
-        # Create a service for task list
-        self.srv = self.create_service(TaskList, 'task_list', self.handle_task_list)
-     
+        # Battery Subscription
+        self.create_subscription(String, '/simulation/battery_updates', self.battery_callback, 10)
+
+        # Client to query shelf locations
+        self.shelf_list_client = self.create_client(GetShelfList, '/get_shelf_list')
+        self.get_drop_off_pose_client = self.create_client(GetPose, '/get_drop_off_pose')
+
+        # Service Server for Task Assignment
+        self.create_service(TaskList, 'task_list', self.handle_task_list)
+
+    # execute_order_callback removed as logic is moved to task_manager
+
+    def battery_callback(self, msg):
+        try:
+            updates = json.loads(msg.data)
+            for robot_id, level in updates.items():
+                robot_name = f'robot_{robot_id}'
+                if robot_name in self.robots:
+                    self.robots[robot_name]["battery_level"] = float(level)
+        except Exception as e:
+            self.get_logger().error(f"Failed to parse battery update: {e}")
+
     def log_to_central(self, level, message, robot_namespace=None, log_source="FleetManager"):
         """Publishes logs to the central logging topic."""
         log_msg = Logs()
@@ -148,7 +177,6 @@ class FleetManager(Node):
                 robot_id = request.task_list[0].robot_id
                 robot_namespace = f'robot_{robot_id}'
                 if not self.robots[robot_namespace]["is_available"]:
-                    # self.log_to_central('INFO', f'Robot {robot_id} is not available', robot_namespace, "handle_task_list")
                     response.success = False
                     return response
 
@@ -173,6 +201,7 @@ class FleetManager(Node):
         for task in task_list:
             pose = PoseStamped()
             pose.header.frame_id = 'map'
+            pose.header.stamp = self.get_clock().now().to_msg()
             pose.pose = task.shelf_location
             waypoints.append(pose)
         return waypoints
@@ -226,29 +255,35 @@ class FleetManager(Node):
 
     def get_result_callback(self, future, robot_namespace):
         """Processes the result of a completed goal and updates robot status."""
-        result = future.result().result
-        self.log_to_central('INFO', f'Result received for {robot_namespace}: {result}', robot_namespace, "get_result_callback")
-        for goal_id, stored_robot_namespace in list(self.robot_to_goal_id.items()):
-            if stored_robot_namespace == robot_namespace:
-                del self.robot_to_goal_id[goal_id]
-        goal_handle = self.goal_handles.pop(robot_namespace, None)
-        if goal_handle:
-            # Update robot status to available after task completion
-            self.robots[robot_namespace]["is_available"] = True
-            self.robots[robot_namespace]["status"] = "idle"
+        try:
+            result = future.result()
+            status = result.status
+            # Status 4 = SUCCEEDED, 5 = CANCELED, 6 = ABORTED
+            if status == 4:
+                self.log_to_central('INFO', f'Navigation completed for {robot_namespace}', robot_namespace, "get_result_callback")
+            else:
+                self.log_to_central('WARN', f'Navigation ended with status {status} for {robot_namespace}', robot_namespace, "get_result_callback")
+        except Exception as e:
+            self.log_to_central('ERROR', f'Failed to get result for {robot_namespace}: {e}', robot_namespace, "get_result_callback")
+        
+        # Set robot back to available regardless of success/failure
+        self.robots[robot_namespace]["is_available"] = True
+        self.robots[robot_namespace]["status"] = "idle"
+        self.log_to_central('INFO', f'Robot {robot_namespace} is now idle', robot_namespace, "get_result_callback")
 
 def main(args=None):
     """Initializes the FleetManager node and starts the ROS 2 event loop."""
     rclpy.init(args=args)
     
     # Create a temporary node to declare and retrieve parameters
-    temp_node = rclpy.create_node('temp_node')
-    temp_node.declare_parameter('num_robots', 2)  # Default value is 2
-    num_robots = temp_node.get_parameter('num_robots').value
-    temp_node.destroy_node()
+    # temp_node = rclpy.create_node('temp_node')
+    # temp_node.declare_parameter('num_robots', 2)  # Default value is 2
+    # num_robots = temp_node.get_parameter('num_robots').value
+    # temp_node.destroy_node()
     
-    fleet_manager = FleetManager(num_robots)
-    rclpy.spin(fleet_manager)
+    fleet_manager = FleetManager()
+    executor = MultiThreadedExecutor()
+    rclpy.spin(fleet_manager, executor=executor)
     fleet_manager.destroy_node()
     rclpy.shutdown()
 

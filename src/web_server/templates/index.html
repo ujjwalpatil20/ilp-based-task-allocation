@@ -1,391 +1,511 @@
-<!--
-index.html
-
-This HTML file provides a web-based interface for managing warehouse operations, including 
-inventory monitoring, order processing, robot fleet status tracking, and log management. 
-The interface is built using Bootstrap for styling and JavaScript for dynamic content updates.
-
-Sections:
-    - Navigation Tabs:
-        - Orders: Allows users to place, view, and repeat orders.
-        - Inventory: Displays current inventory levels and enables manual updates.
-        - Robot Status: Shows real-time status and battery levels of the robot fleet.
-        - Logs: Displays system logs retrieved from the backend.
-
-Features:
-    - Order Management:
-        - Users can create and submit new orders.
-        - Orders are validated against available inventory before submission.
-        - Users can repeat previous orders.
-    - Inventory Management:
-        - Displays shelf-wise inventory information.
-        - Allows users to update inventory levels for a selected shelf.
-    - Robot Fleet Monitoring:
-        - Displays the status and battery level of each robot.
-    - Logging System:
-        - Shows logs retrieved from the backend.
-
-Dependencies:
-    - Bootstrap (CDN for styling)
-    - JavaScript (Fetch API for real-time updates)
-    - Flask Backend (server.py) for API communication
-    - ROS 2 integration for real-time inventory, order, and fleet updates
-
-JavaScript Functions:
-    - validateOrderForm(): Validates order inputs before submission.
-    - addShelf(): Dynamically adds an additional product selection field for orders.
-    - updateInventory(): Fetches and updates the inventory table dynamically.
-    - submitInventoryUpdate(event): Sends an inventory update request to the backend.
-    - updateLogs(): Fetches and updates log entries dynamically.
-    - updateRobotStatus(): Fetches and updates robot fleet status dynamically.
-
-Usage:
-    - Open the web interface in a browser at:
-        http://127.0.0.1:5000/
-    - Use the navigation tabs to manage orders, inventory, robot fleet status, and system logs.
-
-Example Workflow:
-    1. Navigate to the "Orders" tab and submit an order.
-    2. Monitor inventory levels in the "Inventory" tab.
-    3. Track robot activity in the "Robot Status" tab.
-    4. View logs in the "Logs" tab for system events.
-
-Updates:
-    - Inventory data refreshes every 30 seconds.
-    - Logs update every 3 seconds.
-    - Robot status refreshes every second.
--->
-
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Warehouse Management</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <title>Warehouse Control Center</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-primary: #3b82f6;
+            --accent-hover: #2563eb;
+            --success: #22c55e;
+            --warning: #eab308;
+            --danger: #ef4444;
+            --border-color: #334155;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            background: linear-gradient(to right, var(--accent-primary), #60a5fa);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin: 0;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 1.5rem;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .card-header {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.5rem;
+        }
+
+        /* Robot Stats */
+        .robot-stats {
+            grid-column: span 12;
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .robot-card {
+            flex: 1;
+            min-width: 200px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .battery-bar-container {
+            width: 100px;
+            height: 10px;
+            background: #334155;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+
+        .battery-bar {
+            height: 100%;
+            background: var(--success);
+            transition: width 0.5s ease, background-color 0.5s ease;
+        }
+
+        .status-badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-idle {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+        }
+
+        .status-busy {
+            background: rgba(234, 179, 8, 0.2);
+            color: var(--warning);
+        }
+
+        .status-offline {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+        }
+
+        /* Order Form */
+        .order-form-section {
+            grid-column: span 4;
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: var(--text-secondary);
+        }
+
+        select,
+        input {
+            width: 100%;
+            padding: 0.75rem;
+            background: #0f172a;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-family: inherit;
+        }
+
+        button.btn-primary {
+            width: 100%;
+            padding: 0.75rem;
+            background: var(--accent-primary);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button.btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .order-item-row {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        /* Order Status */
+        .order-status-section {
+            grid-column: span 8;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 6px;
+            background: #334155;
+            border-radius: 3px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: var(--accent-primary);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        /* Inventory */
+        .inventory-section {
+            grid-column: span 12;
+            margin-top: 1.5rem;
+        }
+
+        /* Messages */
+        .alert {
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+        }
+
+        .alert-success {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+            border: 1px solid var(--success);
+        }
+
+        .alert-error {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+            border: 1px solid var(--danger);
+        }
+    </style>
 </head>
+
 <body>
-    <div class="container mt-4">
-        <h2>Warehouse Management</h2>
 
-        <ul class="nav nav-tabs" id="warehouseTabs" role="tablist">
-            <li class="nav-item">
-                <button class="nav-link" id="inventory-tab" data-bs-toggle="tab" data-bs-target="#inventory" type="button">Inventory</button>
-            </li>
-            <li class="nav-item">
-                <button class="nav-link active" id="orders-tab" data-bs-toggle="tab" data-bs-target="#orders" type="button">Orders</button>
-            </li>
-            <li class="nav-item">
-                <button class="nav-link" id="robot-status-tab" data-bs-toggle="tab" data-bs-target="#robot-status" type="button">Robot Status</button>
-            </li>
-            <li class="nav-item">
-                <button class="nav-link" id="logs-tab" data-bs-toggle="tab" data-bs-target="#logs" type="button">Logs</button>
-            </li>
-        </ul>
+    <div class="container">
+        <header>
+            <h1>Warehouse Control Center</h1>
+            <div id="connection-status" class="status-badge status-idle">System Online</div>
+        </header>
 
-        <div class="tab-content mt-3">
-            <!-- Orders Tab -->
-            <div class="tab-pane fade show active" id="orders">
-                <h3>Orders</h3>
-                
-                <!-- Display error messages dynamically -->
-		{% if error_message %}
-		    <div class="alert alert-danger" role="alert">
-			{{ error_message }}
-		    </div>
-		{% endif %}
+        {% if success_message %}
+        <div class="alert alert-success">{{ success_message }}</div>
+        {% endif %}
+        {% if error_message %}
+        <div class="alert alert-error">{{ error_message | safe }}</div>
+        {% endif %}
 
-		{% if success_message %}
-		    <div class="alert alert-success" role="alert">
-			{{ success_message }}
-		    </div>
-		{% endif %}
+        <div class="grid">
+            <!-- Robot Status -->
+            <div class="card robot-stats" id="robot-stats-container">
+                <!-- Populated by JS -->
+                <div style="color: var(--text-secondary);">Loading Fleet Status...</div>
+            </div>
 
-                <form action="/submit_order" method="post" onsubmit="return validateOrderForm();">
-                    <h4>New Order</h4>
+            <!-- Order Form -->
+            <div class="card order-form-section">
+                <div class="card-header">New Order</div>
+                <form action="/submit_order" method="POST" id="orderForm">
                     <div id="order-items">
-                        <div class="order-item">
-                            <label><strong>Select Product</strong></label>
-                            <select name="shelf_id[]" class="form-control mb-2" required>
-                                <option value="" disabled selected>-- Select a Product --</option>
-                                {% for shelf in available_shelves %}
-                                    <option value="{{ shelf.shelf_id }}">{{ shelf_to_product[shelf.shelf_id] }}</option>
-                                {% endfor %}
-                            </select>
-
-                            <label><strong>Quantity</strong></label>
-                            <input type="number" name="quantity[]" class="form-control mb-2" required min="1">
+                        <div class="order-item-row">
+                            <div style="flex: 2;">
+                                <label>Product / Shelf</label>
+                                <select name="shelf_id[]" required>
+                                    {% for shelf in available_shelves %}
+                                    <option value="{{ shelf.shelf_id }}">{{ shelf_to_product[shelf.shelf_id] }} (Qty: {{
+                                        shelf.current_inventory }})</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div style="flex: 1;">
+                                <label>Qty</label>
+                                <input type="number" name="quantity[]" value="1" min="1" required>
+                            </div>
                         </div>
                     </div>
 
-                    <button type="button" class="btn btn-primary mb-2" onclick="addShelf()">Add Another Product</button>
-                    <button type="submit" class="btn btn-success">Submit Order</button>
+                    <button type="button" onclick="addOrderItem()"
+                        style="background: transparent; border: 1px solid var(--border-color); color: var(--text-secondary); width: 100%; margin-bottom: 1rem; padding: 0.5rem; border-radius: 6px; cursor: pointer;">+
+                        Add Item</button>
+                    <button type="submit" class="btn-primary">Submit Order</button>
+                    <button type="button" onclick="generateRandomOrder()" class="btn-primary"
+                        style="background: linear-gradient(135deg, #8b5cf6, #6366f1); margin-top: 0.5rem;">
+                        🎲 Random Order
+                    </button>
                 </form>
+            </div>
 
-                <h3>Order List</h3>
-                <table class="table table-bordered">
+            <!-- Order Status -->
+            <div class="card order-status-section">
+                <div class="card-header">Active Orders</div>
+                <table>
                     <thead>
                         <tr>
-                            <th>Date</th>
-                            <th>Time</th>
                             <th>Order ID</th>
-                            <th>Product Details</th>
-                            <th>Actions</th>
+                            <th>Details</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Action</th>
                         </tr>
                     </thead>
-                    <tbody>
-                        {% for order in orders %}
+                    <tbody id="order-table-body">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Inventory -->
+            <div class="card inventory-section">
+                <div class="card-header">Inventory Overview</div>
+                <table>
+                    <thead>
                         <tr>
-                            <td>{{ order['timestamp'].split(' ')[0] }}</td>
-                            <td>{{ order['timestamp'].split(' ')[1] }}</td>
-                            <td>{{ order['order_id'] }}</td>
-                            <td>
-                                {% for shelf in order['shelves'] %}
-                                    <div>Product {{ shelf_to_product[shelf['shelf_id']] }}: {{ shelf['quantity'] }}</div>
-                                {% endfor %}
-                            </td>
-                            <td>
-                                <form action="/repeat_order/{{ order['order_id'] }}" method="POST" class="d-inline">
-				    <button class="btn btn-warning btn-sm">Repeat</button>
-			        </form>
-                            </td>
+                            <th>Shelf ID</th>
+                            <th>Product</th>
+                            <th>Capacity</th>
+                            <th>Stock</th>
+                            <th>Location</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inventory-table-body">
+                        {% for shelf in available_shelves %}
+                        <tr>
+                            <td>#{{ shelf.shelf_id }}</td>
+                            <td>{{ shelf_to_product[shelf.shelf_id] }}</td>
+                            <td>{{ shelf.shelf_capacity }}</td>
+                            <td>{{ shelf.current_inventory }}</td>
+                            <td>({{ "%.2f"|format(shelf.shelf_location.position.x) }}, {{
+                                "%.2f"|format(shelf.shelf_location.position.y) }})</td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
 
-            <!-- Inventory Tab -->
-            <div class="tab-pane fade" id="inventory">
-                <h3>Inventory</h3>
-
-                <table class="table table-bordered">
-                    <thead>
-                        <tr>
-                            <th>Shelf ID</th>
-                            <th>Product</th>
-                            <th>Capacity</th>
-                            <th>Current Inventory</th>
-                        </tr>
-                    </thead>
-                    <tbody id="inventory-table">
-                        <!-- Data will be dynamically inserted here -->
-                    </tbody>
-                </table>
-
-                <div class="mt-4">
-                    <h4>Update Inventory</h4>
-                    <form id="updateInventoryForm" onsubmit="submitInventoryUpdate(event)">
-                        <label><strong>Select Shelf</strong></label>
-                        <select id="shelfSelect" class="form-control mb-2" required>
-                            <option value="" disabled selected>-- Select a Shelf --</option>
-                            {% for shelf in available_shelves %}
-                                <option value="{{ shelf.shelf_id }}">Shelf {{ shelf.shelf_id }} - {{ shelf.product }}</option>
-                            {% endfor %}
-                        </select>
-
-                        <label><strong>New Inventory Quantity</strong></label>
-                        <input type="number" id="newInventory" class="form-control mb-2" required min="0">
-
-                        <button type="submit" class="btn btn-success">Update Inventory</button>
-                    </form>
+            <!-- System Logs -->
+            <div class="card logs-section" style="grid-column: span 12; margin-top: 1.5rem;">
+                <div class="card-header">System Logs</div>
+                <div id="logs-container"
+                    style="max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.9rem; background: rgba(0,0,0,0.3); padding: 1rem; border-radius: 6px;">
+                    <div style="color: var(--text-secondary);">Waiting for logs...</div>
                 </div>
             </div>
 
-            <!-- Logs Tab -->
-            <div class="tab-pane fade" id="logs">
-                <h3>Logs</h3>
-                <table class="table table-bordered" id="logs-table">
-                    <thead>
-                        <tr>
-                            <th>Timestamp</th>
-                            <th>Log Level</th>
-                            <th>Node</th>
-                            <th>Message</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <!-- Logs will be dynamically inserted here -->
-                    </tbody>
-                </table>
-            </div>
-            
-            <!-- Robot Status Tab -->
-            <div class="tab-pane fade" id="robot-status">
-                <h3>Robot Fleet Status</h3>
-                <table class="table table-bordered">
-                    <thead>
-                        <tr>
-                            <th>Robot ID</th>
-                            <th>Status</th>
-                            <th>Battery Level</th>
-                        </tr>
-                    </thead>
-                    <tbody id="robot-status-table">
-                        <!-- Robot status data will be dynamically inserted here -->
-                    </tbody>
-                </table>
-            </div>
+
+
+
         </div>
     </div>
 
     <script>
-        async function validateOrderForm() {
-            let shelfSelects = document.getElementsByName('shelf_id[]');
-            let quantityInputs = document.getElementsByName('quantity[]');
+        // Utils
+        function createRobotCard(id, data) {
+            const statusClass = data.status === 'idle' ? 'status-idle' : 'status-busy';
+            const batteryColor = data.battery_level < 20 ? 'var(--danger)' : (data.battery_level < 50 ? 'var(--warning)' : 'var(--success)');
 
-            let inventoryData = await fetch('/get_inventory').then(res => res.json());
+            return `
+            <div class="robot-card" style="border-left: 4px solid ${batteryColor}">
+                <div>
+                    <div style="font-weight: 600;">Robot ${id}</div>
+                    <div class="status-badge ${statusClass}" style="display:inline-block; margin-top:0.25rem;">${data.status}</div>
+                </div>
+                <div style="text-align: right;">
+                    <div style="font-size: 0.875rem; color: var(--text-secondary);">Battery</div>
+                    <div style="font-weight: 600;">${Math.round(data.battery_level)}%</div>
+                    <div class="battery-bar-container">
+                        <div class="battery-bar" style="width: ${data.battery_level}%; background-color: ${batteryColor};"></div>
+                    </div>
+                </div>
+            </div>
+        `;
+        }
 
-            let inventoryMap = {};
-            inventoryData.forEach(shelf => {
-                inventoryMap[shelf.shelf_id] = shelf.current_inventory;
-            });
+        // Polling Functions
+        async function updateRobotStatus() {
+            try {
+                const res = await fetch('/get_robot_status');
+                const data = await res.json();
+                const container = document.getElementById('robot-stats-container');
 
-            for (let i = 0; i < shelfSelects.length; i++) {
-                let shelfId = shelfSelects[i].value;
-                let quantity = quantityInputs[i].value;
-
-                if (!shelfId || quantity <= 0) {
-                    alert("Please enter a valid quantity for all selected products!");
-                    return false;
+                if (Object.keys(data).length === 0) {
+                    container.innerHTML = '<div style="color: var(--text-secondary);">No robots connected.</div>';
+                    return;
                 }
 
-                if (shelfId in inventoryMap && quantity > inventoryMap[shelfId]) {
-                    alert(`Only ${inventoryMap[shelfId]} items available in stock for selected product.`);
-                    return false;
+                container.innerHTML = Object.entries(data).map(([id, info]) => createRobotCard(id, info)).join('');
+            } catch (e) {
+                console.error("Failed to fetch robot status", e);
+            }
+        }
+
+        async function updateOrderStatus() {
+            try {
+                const res = await fetch('/get_order_status');
+                const data = await res.json();
+                const tbody = document.getElementById('order-table-body');
+
+                tbody.innerHTML = data.map(order => `
+                <tr>
+                    <td>
+                        <strong>#${order.order_id}</strong><br>
+                        <span style="font-size: 0.8rem; color: var(--text-secondary);">${order.timestamp}</span>
+                    </td>
+                    <td>
+                         ${order.shelves.map(s => `<div style="font-size:0.9rem;">Shelf #${s.shelf_id} (x${s.quantity})</div>`).join('')}
+                    </td>
+                    <td>
+                        <span class="status-badge" style="background: rgba(255,255,255,0.1);">${order.status}</span>
+                    </td>
+                    <td style="width: 200px;">
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" style="width: ${order.progress * 100}%"></div>
+                        </div>
+                    </td>
+                    <td>
+                        <form action="/repeat_order/${order.order_id}" method="POST" style="margin:0;">
+                            <button style="background:none; border:none; color: var(--accent-primary); cursor:pointer; font-weight:600;">Repeat</button>
+                        </form>
+                    </td>
+                </tr>
+            `).join('');
+            } catch (e) {
+                console.error("Failed to fetch order status", e);
+            }
+        }
+
+        async function updateLogs() {
+            try {
+                const res = await fetch('/get_logs');
+                const data = await res.json();
+                const container = document.getElementById('logs-container');
+
+                if (!data || data.length === 0) {
+                    return;
                 }
+
+                container.innerHTML = data.reverse().map(log => {
+                    let color = 'var(--text-primary)';
+                    if (log.log_level === 'ERROR' || log.level === 'ERROR') color = 'var(--danger)';
+                    else if (log.log_level === 'WARN' || log.level === 'WARN') color = 'var(--warning)';
+
+                    const time = log.timestamp && log.timestamp.sec ? new Date(log.timestamp.sec * 1000).toLocaleTimeString() : (log.timestamp || '');
+                    const node = log.node_name || log.node || '?';
+                    const msg = log.message || log.msg || '';
+
+                    return `<div style="margin-bottom: 0.25rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.25rem;">
+                       <span style="color: var(--accent-primary); font-weight: 600;">[${time}]</span> 
+                       <span style="color: var(--text-secondary);">[${node}]</span> 
+                       <span style="color: ${color}">${msg}</span>
+                   </div>`;
+                }).join('');
+
+            } catch (e) {
+                console.error("Failed to fetch logs", e);
             }
-
-            return true;
         }
 
-        function addShelf() {
-            let newItem = document.createElement('div');
-            newItem.classList.add('order-item');
-            newItem.innerHTML = `
-                <label><strong>Select Product</strong></label>
-                <select name="shelf_id[]" class="form-control mb-2" required>
-                    <option value="" disabled selected>-- Select a Product --</option>
-                    {% for shelf in available_shelves %}
-                        <option value="{{ shelf.shelf_id }}">{{ shelf_to_product[shelf.shelf_id] }}</option>
-                    {% endfor %}
-                </select>
-                <label><strong>Quantity</strong></label>
-                <input type="number" name="quantity[]" class="form-control mb-2" required min="1">
-            `;
-            document.getElementById('order-items').appendChild(newItem);
+        function addOrderItem() {
+            const container = document.getElementById('order-items');
+            const firstRow = container.querySelector('.order-item-row');
+            const clone = firstRow.cloneNode(true);
+            // Reset values
+            clone.querySelector('input').value = 1;
+            container.appendChild(clone);
         }
 
-        function updateInventory() {
-            fetch('/get_inventory')
-                .then(response => response.json())
-                .then(data => {
-                    const tbody = document.getElementById('inventory-table');
-                    tbody.innerHTML = '';  
-                    data.forEach(shelf => {
-                        tbody.innerHTML += `
-                            <tr>
-                                <td>${shelf.shelf_id}</td>
-                                <td>${shelf.product}</td>
-                                <td>${shelf.capacity}</td>
-                                <td>${shelf.current_inventory}</td>
-                            </tr>
-                        `;
-                    });
-                })
-                .catch(error => console.error('Error fetching inventory:', error));
-        }
-        
-        function submitInventoryUpdate(event) {
-        event.preventDefault(); 
+        async function generateRandomOrder() {
+            try {
+                const res = await fetch('/random_order', { method: 'POST' });
+                const data = await res.json();
 
-        const shelfId = document.getElementById('shelfSelect').value;
-        const newInventory = document.getElementById('newInventory').value;
-
-        if (!shelfId || newInventory === "") {
-            alert("Please select a shelf and enter a valid inventory amount.");
-            return;
-        }
-
-        fetch('/update_inventory', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ shelf_id: parseInt(shelfId), new_inventory: parseInt(newInventory) })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert(`✅ Inventory updated successfully!`);
-                updateInventory(); 
-            } else {
-                alert(`Error: ${data.error}`);
+                if (data.success) {
+                    console.log('Random order created:', data.order_id);
+                    // Refresh order status immediately
+                    updateOrderStatus();
+                } else {
+                    alert('Failed to create random order: ' + (data.error || 'Unknown error'));
+                }
+            } catch (e) {
+                console.error('Failed to generate random order', e);
+                alert('Failed to generate random order');
             }
-        })
-        .catch(error => {
-            console.error('Error updating inventory:', error);
-            alert("Error updating inventory. Check console for details.");
-        });
-    }
-
-        function updateLogs() {
-            fetch('/get_logs')
-                .then(response => response.json())
-                .then(logs => {
-                    const tbody = document.querySelector('#logs-table tbody');
-                    tbody.innerHTML = '';  
-                    logs.forEach(log => {
-                        tbody.innerHTML += `
-                            <tr>
-                                <td>${log.timestamp}</td>
-                                <td>${log.log_level}</td>
-                                <td>${log.node}</td>
-                                <td>${log.message}</td>
-                            </tr>
-                        `;
-                    });
-                })
-                .catch(error => console.error('Error fetching logs:', error));
         }
-        
-        function updateRobotStatus() {
-            fetch('/get_robot_status')
-                .then(response => response.json())
-                .then(data => {
-                    const tbody = document.getElementById('robot-status-table');
-                    tbody.innerHTML = '';  // Clear the table before updating
-                    Object.keys(data).forEach(robot_id => {
-                        const robot = data[robot_id];
-                        tbody.innerHTML += `
-                            <tr>
-                                <td>${robot_id}</td>
-                                <td>${robot.status === 'idle' ? '🟢 Idle' : '🔴 Occupied'}</td>
-                                <td>${robot.battery_level}%</td>
-                            </tr>
-                        `;
-                    });
-                })
-                .catch(error => console.error('Error fetching robot status:', error));
-        }
-        
-        setTimeout(function() {
-           let alertBox = document.querySelector(".alert");
-           if (alertBox) {
-               alertBox.style.display = "none";
-           }
-        }, 5000);
 
-        setInterval(updateInventory, 30000);
-        setInterval(updateLogs, 3000);
+        // Init loops
         setInterval(updateRobotStatus, 1000);
-
-        document.getElementById("inventory-tab").addEventListener("click", updateInventory);
-        
-        updateInventory();
-        updateLogs();
+        setInterval(updateOrderStatus, 1000);
         updateRobotStatus();
-        
+        updateOrderStatus();
+        setInterval(updateLogs, 2000);
+        updateLogs();
+
     </script>
 </body>
-</html>
 
+</html>

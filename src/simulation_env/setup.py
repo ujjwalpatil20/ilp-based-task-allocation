@@ -42,6 +42,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-        ],
+        'battery_sim_node = simulation_env.battery_sim_node:main',
+    ],
     },
 )

@@ -32,6 +32,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/TaskList.srv"
   "srv/GetPose.srv"
   "action/TaskList.action"
+  "action/ProcessOrder.action"
   DEPENDENCIES geometry_msgs
 )
 
