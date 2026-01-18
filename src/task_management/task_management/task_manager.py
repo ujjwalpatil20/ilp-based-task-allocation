@@ -42,6 +42,9 @@ import math
 from collections import deque
 import threading
 import time
+import json
+from datetime import datetime
+from std_msgs.msg import String
 
 class TaskManager(Node):
     def __init__(self):
@@ -57,6 +60,9 @@ class TaskManager(Node):
         # Publishers
         self.order_end_publisher = self.create_publisher(Order, '/end_order', 10)
         self.log_publisher = self.create_publisher(Logs, '/central_logs', 10)
+        
+        # ILP Dataset Logger Publisher
+        self.ilp_pub = self.create_publisher(String, "/ilp/task_allocation_event", 10)
 
         # Action Server
         self._action_server = ActionServer(
@@ -103,6 +109,10 @@ class TaskManager(Node):
         
         # Flag to prevent multiple process_orders coroutines
         self.processing_orders_running = False
+        
+        # Workload tracking for ILP (Robot ID -> Task Count)
+        from collections import defaultdict
+        self.robot_workload = defaultdict(int)
 
         # Start the order processing loop in a separate thread
         self.log_to_central("INFO", "Task Manager is ready.")
@@ -119,6 +129,25 @@ class TaskManager(Node):
         log_msg.log_level = level
         log_msg.message = message
         self.log_publisher.publish(log_msg)
+
+    # ILP Dataset Logger Publisher
+    def publish_ilp_allocation_event(self, task_id: str, assigned_robot: str, candidates: list,
+                                 task_type: str = "order", priority: str = "normal", location: str = ""):
+        payload = {
+            "event": "task_allocation",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "task": {
+                "id": str(task_id),
+                "type": str(task_type),
+                "priority": str(priority),
+                "location": str(location)
+            },
+            "assigned_robot": str(assigned_robot),
+            "candidates": candidates
+        }
+        msg = String()
+        msg.data = json.dumps(payload)
+        self.ilp_pub.publish(msg)
 
 
     def run_asyncio_loop(self):
@@ -319,6 +348,8 @@ class TaskManager(Node):
         
         # Remove from local tracking
         self.assigned_robots.discard(assigned_robot_id)
+        if self.robot_workload[assigned_robot_id] > 0:
+            self.robot_workload[assigned_robot_id] -= 1
         
         # Complete the action
         if order.order_id in self.pending_goals:
@@ -376,35 +407,64 @@ class TaskManager(Node):
         """
         best_robot_id = None
         best_score = -1
+        candidates = []
 
         # A list of RobotStatus
         robot_fleet_list = robot_fleet_response.robot_status_list
         shelf_details = shelf_query_response.shelf_status_list
 
         for robot in robot_fleet_list:
-            # Check both shared_memory status AND our local tracking
-            if robot.is_available and robot.robot_id not in self.assigned_robots:
-                # Calculate proximity score (distance to shelf)
-                robot_location = robot.current_location
-
-                first_shelf = None
-                for shelf in shelf_details:
-                    if shelf.shelf_id == order.product_list[0].shelf_id:
-                        first_shelf = shelf
-                        break
-
-                if not first_shelf:
-                    self.log_to_central("WARN", f"Shelf {order.product_list[0].shelf_id} not found.")
-                    return None
-
+            # Calculate metrics for ALL robots for logging
+            robot_location = robot.current_location
+            
+            # Find shelf (first product's shelf)
+            first_shelf = None
+            for shelf in shelf_details:
+                if shelf.shelf_id == order.product_list[0].shelf_id:
+                    first_shelf = shelf
+                    break
+            
+            dist = -1.0
+            if first_shelf:
                 shelf_location = first_shelf.shelf_location
-                distance = self.calculate_distance(robot_location, shelf_location)
+                dist = self.calculate_distance(robot_location, shelf_location)
+            
+            # Record candidate data
+            current_workload = self.robot_workload[robot.robot_id]
+            candidates.append({
+                "robot": robot.robot_id,
+                "battery": float(robot.battery_level),
+                "idle": bool(robot.is_available),
+                "workload": int(current_workload),
+                "distance": float(dist)
+            })
 
-                # Calculate battery score (higher battery is better)
-                battery_score = robot.battery_level
+            # Check both shared_memory status AND our local tracking for assignment
+            # Note: For ILP demo, we might relax 'is_available' constraint if we want to queue, 
+            # but standard logic requires availability. 
+            # We will use 'is_available' but apply our custom scoring logic.
+            if robot.is_available and robot.robot_id not in self.assigned_robots:
+                if not first_shelf:
+                     continue
 
-                # Combined score (lower distance and higher battery are better)
-                score = (1 / (distance + 1)) * battery_score
+                # --- 3-Step Hybrid Logic ---
+                
+                # 1. Overworked? (Workload > 2)
+                if current_workload > 2:
+                    self.log_to_central("WARN", f"Robot {robot.robot_id} is overworked ({current_workload}). Skipping.")
+                    score = -1.0 
+                    
+                # 2. Critical Battery? (<= 40%) - Survival Mode
+                elif robot.battery_level <= 0.40:
+                    # Prioritize Most Charged (Score = Battery Level)
+                    # We normalize distance effect out
+                    score = float(robot.battery_level) * 10.0 # Weight it to ensure it's positive
+                    # To clarify for Popper: We want "most_charged" to win here.
+                    
+                # 3. Normal Operation - Efficiency Mode
+                else:
+                    # Prioritize Closest (Score = 1/Distance)
+                    score = 100.0 / (dist + 1.0)
 
                 if score > best_score:
                     best_score = score
@@ -429,6 +489,21 @@ class TaskManager(Node):
             drop_off_task = self.get_drop_off_task(best_robot_id, drop_off_pose)
             task_list.append(drop_off_task)
             self.log_to_central("INFO", f"Assigned Order to robot {best_robot_id}: {task_list}")
+            
+            # Update workload
+            self.robot_workload[best_robot_id] += 1
+            
+            # --- ILP Logging ---
+            task_id_log = f"order_{order.order_id}"
+            loc_log = str(order.product_list[0].shelf_id) if order.product_list else ""
+            self.publish_ilp_allocation_event(
+                task_id=task_id_log,
+                assigned_robot=str(best_robot_id),
+                candidates=candidates,
+                task_type="order_pick",
+                location=loc_log
+            )
+            # -------------------
 
             return task_list
         else:
