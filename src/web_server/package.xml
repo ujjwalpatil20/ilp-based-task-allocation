@@ -4,7 +4,7 @@
   <name>web_server</name>
   <version>1.0.0</version>
   <description>Flask-based web interface for warehouse control and order management</description>
-  <maintainer email="ujjwal@hbrs.de">Ujjwal</maintainer>
+  <maintainer email="ujjwalpatil20@gmail.com">Ujjwal</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

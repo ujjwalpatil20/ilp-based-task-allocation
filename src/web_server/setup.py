@@ -20,7 +20,7 @@ setup(
     install_requires=['setuptools', 'flask'],
     zip_safe=True,
     maintainer='Ujjwal',
-    maintainer_email='ujjwal@hbrs.de',
+    maintainer_email='ujjwalpatil20@gmail.com',
     description='Flask-based web interface for warehouse control and order management',
     license='MIT',
     tests_require=['pytest'],

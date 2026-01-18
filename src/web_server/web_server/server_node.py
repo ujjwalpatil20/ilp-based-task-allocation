@@ -104,9 +104,7 @@ def get_template_directory():
 rclpy.init()
 node = Node('web_server')
 
-# Use workspace logs directory for published orders
-workspace_dir = get_workspace_directory()
-log_dir = os.path.join(workspace_dir, "logs")
+log_dir = "published_orders"
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
