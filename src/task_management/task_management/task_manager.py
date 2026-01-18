@@ -42,10 +42,18 @@ import math
 from collections import deque
 import threading
 import time
+import os
+import csv
+from datetime import datetime
 
 class TaskManager(Node):
     def __init__(self):
         super().__init__('task_manager')
+
+        # --- XAI Initialization ---
+        self.csv_file = '/home/alisha/ros2_ws/src/ilp-based-task-allocation/src/task_management/task_management/warehouse_training_data.csv'
+        self.robot_workload = {} 
+        self.init_csv()
 
         # Callback group for services (to allow concurrent service calls)
         self.callback_group = ReentrantCallbackGroup()
@@ -110,7 +118,27 @@ class TaskManager(Node):
         self.thread = threading.Thread(target=self.run_asyncio_loop, daemon=True)
         self.thread.start()
 
+    # --- XAI HELPER METHODS ---
+    def init_csv(self):
+        """Ensures the CSV file exists with a header."""
+        os.makedirs(os.path.dirname(self.csv_file), exist_ok=True)
+        if not os.path.exists(self.csv_file):
+            with open(self.csv_file, mode='w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['timestamp', 'robot_id', 'distance', 'distance_bucket', 'battery', 'battery_bucket', 'workload', 'is_chosen'])
 
+    def get_buckets(self, dist, batt):
+        dist_bucket = "very_near" if dist < 2.0 else "near" if dist < 4.0 else "far"
+        batt_bucket = "high" if batt > 70 else "medium" if batt > 30 else "low"
+        return dist_bucket, batt_bucket
+
+    def save_to_csv(self, robot_id, distance, battery, workload, chosen):
+        dist_bucket, batt_bucket = self.get_buckets(distance, battery)
+        with open(self.csv_file, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([datetime.now(), robot_id, round(distance, 2), dist_bucket, battery, batt_bucket, workload, int(chosen)])
+
+# --- CORE LOGIC ---
     def log_to_central(self, level, message):
         """Publishes logs to the central logging topic."""
         log_msg = Logs()
@@ -197,8 +225,8 @@ class TaskManager(Node):
                 del self.pending_goals[order_msg.order_id]
                 return ProcessOrder.Result(success=False, message="Canceled")
             
-            time.sleep(1.0) # check status every 1s (blocking is ok in MultiThreadedExecutor)
-            
+            # time.sleep(1.0) # check status every 1s (blocking is ok in MultiThreadedExecutor)
+            await asyncio.sleep(1.0)
         # If break loop, it means handled
         # But wait, if process_order calls succeed(), this function must return Result.
         # But succeed() is terminal? No, it sets state. We still need to return Result object.
@@ -263,6 +291,8 @@ class TaskManager(Node):
                     return
         finally:
             self.processing_orders_running = False
+
+    
     
     async def wait_for_order_completion(self, order, assigned_robot_id):
         """
@@ -296,6 +326,7 @@ class TaskManager(Node):
             if robot_status and robot_status.is_available:
                 # Robot finished!
                 self.order_end_publisher.publish(order)
+                self.robot_workload[assigned_robot_id] -= len(order.product_list)
                 self.log_to_central("INFO", f"Order {order.order_id} Completed Successfully.")
                 
                 if order.order_id in self.pending_goals:
@@ -376,42 +407,96 @@ class TaskManager(Node):
         """
         best_robot_id = None
         best_score = -1
+        decision_context = []
 
         # A list of RobotStatus
         robot_fleet_list = robot_fleet_response.robot_status_list
         shelf_details = shelf_query_response.shelf_status_list
 
+        # for robot in robot_fleet_list:
+            
+        #     # Check both shared_memory status AND our local tracking
+        #     if robot.is_available and robot.robot_id not in self.assigned_robots:
+        #         # Calculate proximity score (distance to shelf)
+        #         robot_location = robot.current_location
+
+        #         first_shelf = None
+        #         for shelf in shelf_details:
+        #             if shelf.shelf_id == order.product_list[0].shelf_id:
+        #                 first_shelf = shelf
+        #                 break
+
+        #         if not first_shelf:
+        #             self.log_to_central("WARN", f"Shelf {order.product_list[0].shelf_id} not found.")
+        #             return None
+
+        #         shelf_location = first_shelf.shelf_location
+        #         distance = self.calculate_distance(robot_location, shelf_location)
+
+        #         # Calculate battery score (higher battery is better)
+        #         battery_score = robot.battery_level
+
+        #         # Combined score (lower distance and higher battery are better)
+        #         score = (1 / (distance + 1)) * battery_score
+
+        #         if score > best_score:
+        #             best_score = score
+        #             best_robot_id = robot.robot_id
+
+        # if best_robot_id:
+        #     # Create a Task message for each product in the order
+        #     task_list = []
+        #     for product in order.product_list:
+        #         shelf = next((s for s in shelf_details if s.shelf_id == product.shelf_id), None)
+        #         task_msg = Task()
+        #         task_msg.task_id = self.task_id_counter
+        #         task_msg.robot_id = best_robot_id
+        #         task_msg.shelf_id = product.shelf_id
+        #         task_msg.shelf_location = shelf.shelf_location
+        #         task_msg.item = shelf.product
+        #         task_msg.item_amount = product.quantity
+        #         task_msg.task_type = f"Move to Shelf {product.shelf_id}"
+        #         self.task_id_counter += 1
+        #         task_list.append(task_msg)
+
+        #     drop_off_task = self.get_drop_off_task(best_robot_id, drop_off_pose)
+        #     task_list.append(drop_off_task)
+        #     self.log_to_central("INFO", f"Assigned Order to robot {best_robot_id}: {task_list}")
+
+        #     return task_list
+        # else:
+        #     self.log_to_central("WARN", "No available robots to assign task.")
+        #     return None
         for robot in robot_fleet_list:
-            # Check both shared_memory status AND our local tracking
-            if robot.is_available and robot.robot_id not in self.assigned_robots:
-                # Calculate proximity score (distance to shelf)
-                robot_location = robot.current_location
+            if robot.robot_id not in self.robot_workload:
+                self.robot_workload[robot.robot_id] = 0
+            
+            current_load = self.robot_workload[robot.robot_id]
 
-                first_shelf = None
-                for shelf in shelf_details:
-                    if shelf.shelf_id == order.product_list[0].shelf_id:
-                        first_shelf = shelf
-                        break
+            if robot.is_available and robot.robot_id not in self.assigned_robots and current_load < 5:
+                first_shelf = next((s for s in shelf_details if s.shelf_id == order.product_list[0].shelf_id), None)
+                if not first_shelf: continue
 
-                if not first_shelf:
-                    self.log_to_central("WARN", f"Shelf {order.product_list[0].shelf_id} not found.")
-                    return None
+                distance = self.calculate_distance(robot.current_location, first_shelf.shelf_location)
+                battery = robot.battery_level
+                score = (1 / (distance + 1)) * battery
 
-                shelf_location = first_shelf.shelf_location
-                distance = self.calculate_distance(robot_location, shelf_location)
-
-                # Calculate battery score (higher battery is better)
-                battery_score = robot.battery_level
-
-                # Combined score (lower distance and higher battery are better)
-                score = (1 / (distance + 1)) * battery_score
+                decision_context.append({
+                    'id': robot.robot_id, 'dist': distance, 'batt': battery, 'load': current_load
+                })
 
                 if score > best_score:
                     best_score = score
                     best_robot_id = robot.robot_id
 
         if best_robot_id:
-            # Create a Task message for each product in the order
+            # Update workload and log to CSV
+            self.robot_workload[best_robot_id] += len(order.product_list)
+            for item in decision_context:
+                # If this is the chosen robot, use the updated workload for the CSV
+                display_load = self.robot_workload[item['id']] if item['id'] == best_robot_id else item['load']
+                self.save_to_csv(item['id'], item['dist'], item['batt'], display_load, (item['id'] == best_robot_id))
+
             task_list = []
             for product in order.product_list:
                 shelf = next((s for s in shelf_details if s.shelf_id == product.shelf_id), None)
@@ -426,14 +511,10 @@ class TaskManager(Node):
                 self.task_id_counter += 1
                 task_list.append(task_msg)
 
-            drop_off_task = self.get_drop_off_task(best_robot_id, drop_off_pose)
-            task_list.append(drop_off_task)
-            self.log_to_central("INFO", f"Assigned Order to robot {best_robot_id}: {task_list}")
-
+            task_list.append(self.get_drop_off_task(best_robot_id, drop_off_pose))
             return task_list
-        else:
-            self.log_to_central("WARN", "No available robots to assign task.")
-            return None
+        
+        return None
 
     def get_drop_off_task(self, robot_id, drop_off_pose):
         # Calculate specific drop-off location for the robot
