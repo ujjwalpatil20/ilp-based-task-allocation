@@ -270,7 +270,7 @@ class SharedMemoryNode(Node):
 
         response.robot_status_list = self.robots
 
-        self.log_to_central("INFO", 'Returning RobotFleetStatus.')
+        # self.log_to_central("INFO", 'Returning RobotFleetStatus.')
         return response
 
     def get_shelf_list_callback(self, request, response):
@@ -295,7 +295,7 @@ class SharedMemoryNode(Node):
         """
         self.database.update({"shelves": self.shelves})
         self.database.update({"robots": self.robots})
-        self.log_to_central("INFO", "Current Database State:")
+        # self.log_to_central("INFO", "Current Database State:")
         #print(self.database)
 
 

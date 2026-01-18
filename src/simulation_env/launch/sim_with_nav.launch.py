@@ -370,7 +370,10 @@ def generate_launch_description():
         executable="battery_sim_node",
         name="battery_sim_node",
         output="screen",
-        parameters=[{'use_sim_time': True}]
+        parameters=[{
+            'use_sim_time': True,
+            'num_robots': LaunchConfiguration('num_of_robots')
+        }]
     )
     ld.add_action(battery_sim_node)
 

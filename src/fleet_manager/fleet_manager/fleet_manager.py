@@ -185,8 +185,8 @@ class FleetManager(Node):
                 self.robots[robot_namespace]["status"] = "busy"
                 self.send_goal(robot_namespace, waypoints)
                 response.success = True
-                task_details = '\n'.join([f'Task: shelf_location=({task.shelf_location.position.x}, {task.shelf_location.position.y}) Shelf ID= {task.shelf_id}' for task in request.task_list])
-                self.log_to_central('INFO', f'TaskList service called for {robot_namespace}. Task List:\n {task_details}', robot_namespace, "handle_task_list")
+                task_count = len(request.task_list)
+                self.log_to_central('INFO', f'received {task_count} tasks for {robot_namespace}.', robot_namespace, "handle_task_list")
             else:
                 self.log_to_central('INFO', 'No tasks available', log_source="handle_task_list")
                 response.success = False
@@ -236,7 +236,10 @@ class FleetManager(Node):
             self.previous_feedback[robot_namespace] = None
 
         if feedback_str != self.previous_feedback[robot_namespace]:
-            self.log_to_central('INFO', f'Robot {robot_namespace}: Feedback changed: {feedback_str}', robot_namespace, "feedback_callback")
+            # self.log_to_central('INFO', f'Robot {robot_namespace}: Feedback changed: {feedback_str}', robot_namespace, "feedback_callback")
+            if hasattr(feedback, 'current_waypoint'):
+                 self.log_to_central('INFO', f'Robot {robot_namespace} reached waypoint {feedback.current_waypoint}', robot_namespace, "feedback_callback")
+                 self.robots[robot_namespace]["status"] = f"Busy: Waypoint {feedback.current_waypoint}"
             self.previous_feedback[robot_namespace] = feedback_str
 
     def goal_response_callback(self, future, robot_namespace, client):
