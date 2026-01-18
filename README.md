@@ -10,8 +10,10 @@ This project implements a multi-robot task distribution system designed for ware
 
 1. **ROS2-Based Architecture**: Built on ROS2 for enhanced communication and scalability.
 2. **User-Friendly GUI**: Provides an intuitive interface for managing orders and monitoring system performance.
-3. **Task Distribution**: Efficient task allocation using a centralized architecture.
+3. **Task Distribution**: Efficient task allocation using a centralized architecture with FIFO queue processing.
 4. **Centralized Logging**: Logs are published to a central logging topic for monitoring and debugging.
+5. **Battery Simulation**: Simulates robot battery drain and monitoring.
+6. **Random Order Generation**: One-click random order generation for testing.
 
 ---
 
@@ -130,7 +132,8 @@ The Warehouse Manager initializes the core nodes required for the system. It inc
 - **Logger Node**: Logs simulation events and data.
 - **Fleet Manager Node**: Manages the robot fleet, with the number of robots specified by the `num_of_robots` parameter.
 - **Shared Memory Node**: Handles shared memory for inter-process communication.
-- **Task Manager Node**: Distributes tasks among robots.
+- **Task Manager Node**: Distributes tasks among robots using FIFO queue processing.
+- **Web Server Node**: Provides a graphical interface for order management (auto-launches with browser).
 
 Run the following command to launch the Warehouse Manager:
 
@@ -138,18 +141,18 @@ Run the following command to launch the Warehouse Manager:
 ros2 launch simulation_env warehouse_manager.launch.py
 ```
 
-### 5. Start the Web Client
+### 5. Access the Web Client
 
-The Web Client provides a graphical interface for managing orders and monitoring the system. It interacts with the Shared Memory to access data.
+The Web Client provides a graphical interface for managing orders and monitoring the system. It is automatically launched as part of the Warehouse Manager and opens in your default browser.
 
-Navigate to the Web Server directory and start the server:
+**Features:**
+- Place orders by selecting products and quantities
+- **Random Order Button**: Generate random test orders with one click
+- Monitor robot fleet status and battery levels
+- View order progress in real-time
+- Access centralized logs
 
-```bash
-cd ~/ros_ws/src/ws24-multi-robot-task-distribution/src/web_server
-./Server.py
-```
-
-Once started, access the Web Client through your browser to place orders and monitor the system in real-time.
+The Web Client is accessible at: `http://localhost:5000`
 
 ![Web GUI](docs/sim_web_gui.png)
 
@@ -252,21 +255,24 @@ The **Shared Memory Module** acts as a centralized database for managing invento
 
 ### 5. **Web Server**
 
-The **Web Server** provides a graphical user interface (GUI) for monitoring and managing the system. It allows users to:
+The **Web Server** is a ROS2 package that provides a graphical user interface (GUI) for monitoring and managing the system. It is launched automatically with the Warehouse Manager.
+
+**Features:**
 - Place orders and view their status.
 - Monitor the inventory and robot fleet status in real-time.
+- Generate random orders for testing.
 - Visualize logs and system performance for debugging.
 
 #### Responsibilities:
-1. Processes user-submitted orders and sends them to the Task Manager for execution
+1. Processes user-submitted orders and sends them to the Task Manager via ROS2 Actions.
 2. Fetches and displays inventory data to track product availability.
 3. Retrieves and updates fleet status to monitor robot activity.
 4. Receives logs from the Central Logger and presents them for analysis.
 
 #### Communication:
-- **Input**: Inventory and Fleet status (via API and ROS2 topics).
-- **Input**: Logs from the log file updated by Central logger.
-- **Output**: Order requests sent to the Task Manager via a ROS2 service.
+- **Input**: Inventory and Fleet status (via ROS2 services and topics).
+- **Input**: Logs from the Central Logger.
+- **Output**: Order requests sent to the Task Manager via ROS2 Actions (`/process_order`).
 
 ---
 
