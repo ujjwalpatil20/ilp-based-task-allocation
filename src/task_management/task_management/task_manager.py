@@ -101,6 +101,8 @@ class TaskManager(Node):
         # Track action goals to succeed them later
         # Map order_id -> goal_handle
         self.pending_goals = {}
+        # Map order_id -> rclpy.task.Future (to unblock executor threads)
+        self.order_futures = {}
         
         # Lock to prevent race conditions in robot assignment
         self.assignment_lock = asyncio.Lock()
@@ -133,7 +135,6 @@ class TaskManager(Node):
         log_msg.message = message
         self.log_publisher.publish(log_msg)
 
-    # ILP Dataset Logger Publisher
     def publish_ilp_allocation_event(self, task_id: str, assigned_robot: str, candidates: list,
                                  task_type: str = "order", priority: str = "normal", location: str = ""):
         payload = {
@@ -188,12 +189,14 @@ class TaskManager(Node):
              order_msg.order_id = int(uuid.uuid4().int >> 64)
 
         # Map product list
-        # Goal uses robot_interfaces/Product (shelf_id, quantity)
-        # Msg uses same
         order_msg.product_list = goal.product_list
         
         # Store handle
         self.pending_goals[order_msg.order_id] = goal_handle
+        
+        # Create a Future object to wait for completion without blocking the thread
+        done_future = rclpy.task.Future()
+        self.order_futures[order_msg.order_id] = done_future
         
         self.log_to_central("INFO", f'Received order request via Action: {order_msg.order_id}')
         self.order_queue.append(order_msg)
@@ -203,38 +206,16 @@ class TaskManager(Node):
             self.create_task(self.process_orders())
         
         # Monitor status
-        # Since this is a coroutine in reentrant group, we can wait
         feedback_msg = ProcessOrder.Feedback()
         feedback_msg.order_id = order_msg.order_id
         feedback_msg.status = "Queued"
         goal_handle.publish_feedback(feedback_msg)
         
-        # Polling for completion
-        # Ideally we use an event, but polling map is safe enough here
-        start_time = time.time()
-        while rclpy.ok():
-            if order_msg.order_id not in self.pending_goals:
-                # Removed from map means completed/succeeded or failed
-                # We need a way to know Status.
-                # Assuming success if removed by process_order
-                # Wait, process_order logic needs to access this handle to complete it.
-                # If I remove it there, I can't check it here easily unless I use another flag.
-                # Let's check status directly.
-                break
-                
-            # If still in map, it's pending/processing
-            # We can update feedback if we had status info from process_order
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                del self.pending_goals[order_msg.order_id]
-                return ProcessOrder.Result(success=False, message="Canceled")
-            
-            time.sleep(1.0) # check status every 1s (blocking is ok in MultiThreadedExecutor)
-            
-        # If break loop, it means handled
-        # But wait, if process_order calls succeed(), this function must return Result.
-        # But succeed() is terminal? No, it sets state. We still need to return Result object.
-        return ProcessOrder.Result(success=True, message="Order Processed")
+        # Await the future. This yields the executor thread to other tasks.
+        result = await done_future
+        
+        del self.order_futures[order_msg.order_id]
+        return result
 
 
     async def process_orders(self):
@@ -243,12 +224,14 @@ class TaskManager(Node):
         Only one order is processed at a time per robot.
         """
         self.processing_orders_running = True
+        last_logged_no_robot_order_id = None
         try:
             while rclpy.ok():
                 if self.order_queue:
                     # Peek at the first order (don't remove yet)
                     order = self.order_queue[0]
-                    self.log_to_central("INFO", f'Processing order: {order.order_id}')
+                    if order.order_id != last_logged_no_robot_order_id:
+                         self.log_to_central("INFO", f'Processing order: {order.order_id}')
                     
                     # Try to find an available robot
                     robot_fleet_response, shelf_query_response, drop_off_pose = await asyncio.gather(
@@ -257,7 +240,7 @@ class TaskManager(Node):
                         self.get_drop_off_pose()
                     )
                     
-                    task_assigned = self.allocate_task(robot_fleet_response, shelf_query_response, drop_off_pose, order)
+                    task_assigned, last_logged_no_robot_order_id = self.allocate_task(robot_fleet_response, shelf_query_response, drop_off_pose, order, last_logged_no_robot_order_id)
                     
                     if task_assigned:
                         # Robot found! Remove order from queue and process it
@@ -272,8 +255,8 @@ class TaskManager(Node):
                             self.assigned_robots.add(assigned_robot_id)
                             
                             # Spawn a separate coroutine to wait for this order's completion
-                            # This allows us to continue processing other orders for other robots
-                            asyncio.create_task(self.wait_for_order_completion(order, assigned_robot_id))
+                            total_tasks = len(task_assigned)
+                            asyncio.create_task(self.wait_for_order_completion(order, assigned_robot_id, total_tasks))
                         else:
                             # Task assignment failed - put order back at front
                             self.order_queue.appendleft(order)
@@ -293,76 +276,134 @@ class TaskManager(Node):
                 else:
                     # Queue empty, exit this coroutine. Will be re-triggered by next order.
                     return
+        except Exception as e:
+             import traceback
+             self.log_to_central("ERROR", f"process_orders loop crashed: {e}\n{traceback.format_exc()}")
         finally:
             self.processing_orders_running = False
     
-    async def wait_for_order_completion(self, order, assigned_robot_id):
+    async def wait_for_order_completion(self, order, assigned_robot_id, total_tasks):
         """
         Waits for a robot to finish navigating and completes the order.
         Runs as a separate coroutine so queue processing can continue.
         """
-        # Feedback: Robot assigned, navigation started
-        if order.order_id in self.pending_goals:
-            fb = ProcessOrder.Feedback()
-            fb.order_id = order.order_id
-            fb.status = f"Navigating (Robot {assigned_robot_id})"
-            fb.progress = 0.3
-            self.pending_goals[order.order_id].publish_feedback(fb)
-        
-        # Wait for robot to finish navigation (poll until idle)
-        max_wait = 300  # 5 minutes max
-        wait_time = 0
-        success = False
-        
-        while wait_time < max_wait:
-            await asyncio.sleep(2.0)
-            wait_time += 2
-            
-            # Check robot status
-            fleet_status = await self.call_robot_fleet_service()
-            robot_status = next(
-                (r for r in fleet_status.robot_status_list if r.robot_id == assigned_robot_id), 
-                None
-            )
-            
-            if robot_status and robot_status.is_available:
-                # Robot finished!
-                self.order_end_publisher.publish(order)
-                self.log_to_central("INFO", f"Order {order.order_id} Completed Successfully.")
-                
-                if order.order_id in self.pending_goals:
-                    fb = ProcessOrder.Feedback()
-                    fb.order_id = order.order_id
-                    fb.status = "Completed"
-                    fb.progress = 1.0
-                    self.pending_goals[order.order_id].publish_feedback(fb)
-                
-                success = True
-                break
-            
-            # Update progress feedback periodically
-            progress = min(0.3 + (wait_time / max_wait) * 0.6, 0.9)
+        try:
+            # Feedback: Robot assigned, navigation started
             if order.order_id in self.pending_goals:
                 fb = ProcessOrder.Feedback()
                 fb.order_id = order.order_id
                 fb.status = f"Navigating (Robot {assigned_robot_id})"
-                fb.progress = progress
+                fb.progress = 0.1
                 self.pending_goals[order.order_id].publish_feedback(fb)
-        
-        # Remove from local tracking
-        self.assigned_robots.discard(assigned_robot_id)
-        
-        # Notify allocator of completion (for workload tracking etc)
-        self.allocator.on_task_completion(assigned_robot_id)
-        
-        # Complete the action
-        if order.order_id in self.pending_goals:
-            if success:
-                self.pending_goals[order.order_id].succeed()
-            else:
-                self.log_to_central("WARN", f"Order {order.order_id} timed out waiting for robot.")
-                self.pending_goals[order.order_id].abort()
-            del self.pending_goals[order.order_id]
+            
+            # --- Fix for Race Condition: Wait for Robot to become BUSY first ---
+            # The robot might still be 'idle' from previous state for a split second before FleetManager updates it.
+            # We must verify it transitions to 'not available' before we start checking for it to become 'available' (idle) again.
+            busy_wait_start = self.get_clock().now()
+            is_robot_busy = False
+            while (self.get_clock().now() - busy_wait_start).nanoseconds / 1e9 < 10.0: # 10s timeout
+                fleet_status = await self.call_robot_fleet_service()
+                robot_status = next(
+                    (r for r in fleet_status.robot_status_list if r.robot_id == assigned_robot_id), 
+                    None
+                )
+                if robot_status and not robot_status.is_available:
+                    is_robot_busy = True
+                    self.log_to_central("INFO", f"Robot {assigned_robot_id} confirmed busy for Order {order.order_id}")
+                    break
+                await asyncio.sleep(0.2)
+            
+            if not is_robot_busy:
+                self.log_to_central("WARN", f"Robot {assigned_robot_id} never became busy for Order {order.order_id}. Assuming assignment failure.")
+                self.assigned_robots.discard(assigned_robot_id)
+                if order.order_id in self.pending_goals:
+                    self.pending_goals[order.order_id].abort()
+                if order.order_id in self.order_futures:
+                    self.order_futures[order.order_id].set_result(ProcessOrder.Result(success=False, message="Robot failed to start"))
+                return
+
+            # Wait for robot to finish navigation (poll until idle)
+            max_wait = 300  # 5 minutes max
+            wait_time = 0
+            success = False
+            
+            while wait_time < max_wait:
+                await asyncio.sleep(0.5) # Fast polling for smoother UI
+                wait_time += 0.5
+                
+                # Check robot status
+                fleet_status = await self.call_robot_fleet_service()
+                robot_status = next(
+                    (r for r in fleet_status.robot_status_list if r.robot_id == assigned_robot_id), 
+                    None
+                )
+                
+                if robot_status and robot_status.is_available:
+                    # Robot finished!
+                    self.order_end_publisher.publish(order)
+                    self.log_to_central("INFO", f"Order {order.order_id} Completed Successfully.")
+                    
+                    if order.order_id in self.pending_goals:
+                        fb = ProcessOrder.Feedback()
+                        fb.order_id = order.order_id
+                        fb.status = "Completed"
+                        fb.progress = 1.0
+                        self.pending_goals[order.order_id].publish_feedback(fb)
+                    
+                    success = True
+                    break
+                
+                # Update progress feedback periodically based on robot status
+                progress = 0.1
+                if robot_status and "Busy: Waypoint" in robot_status.status:
+                    try:
+                        # Status format: "Busy: Waypoint X"
+                        parts = robot_status.status.split()
+                        if len(parts) >= 3:
+                            completed_waypoints = int(parts[2])
+                            if total_tasks > 0:
+                                # Add 0.5 to show we are "in progress" of the current leg
+                                progress = 0.1 + ((completed_waypoints + 0.5) / total_tasks) * 0.8
+                                progress = min(progress, 0.99)
+                    except ValueError:
+                        pass
+
+                if order.order_id in self.pending_goals:
+                    fb = ProcessOrder.Feedback()
+                    fb.order_id = order.order_id
+                    fb.status = f"Navigating (Robot {assigned_robot_id})"
+                    fb.progress = progress
+                    self.pending_goals[order.order_id].publish_feedback(fb)
+            
+            # Remove from local tracking
+            self.assigned_robots.discard(assigned_robot_id)
+            
+            # Notify allocator of completion (for workload tracking etc)
+            self.allocator.on_task_completion(assigned_robot_id)
+            
+            # Complete the action
+            result_msg = None
+            if order.order_id in self.pending_goals:
+                if success:
+                    self.pending_goals[order.order_id].succeed()
+                    result_msg = ProcessOrder.Result(success=True, message="Order Processed")
+                else:
+                    self.log_to_central("WARN", f"Order {order.order_id} timed out waiting for robot.")
+                    self.pending_goals[order.order_id].abort()
+                    result_msg = ProcessOrder.Result(success=False, message="Timed Out")
+                del self.pending_goals[order.order_id]
+            
+            # Unblock the execute callback for this order
+            if order.order_id in self.order_futures:
+                 self.order_futures[order.order_id].set_result(result_msg)
+
+        except Exception as e:
+            import traceback
+            self.log_to_central("ERROR", f"wait_for_order_completion crashed for Order {order.order_id}: {e}\n{traceback.format_exc()}")
+            self.assigned_robots.discard(assigned_robot_id)
+            if order.order_id in self.order_futures and not self.order_futures[order.order_id].done():
+                self.order_futures[order.order_id].set_result(ProcessOrder.Result(success=False, message=f"Internal Error: {e}"))
+
 
     async def call_robot_fleet_service(self):
         """
@@ -402,7 +443,7 @@ class TaskManager(Node):
         await future
         return future.result()
 
-    def allocate_task(self, robot_fleet_response, shelf_query_response, drop_off_pose, order):
+    def allocate_task(self, robot_fleet_response, shelf_query_response, drop_off_pose, order, last_logged_no_robot_order_id):
         # Sort the order's product list based on shelf_id
         order.product_list.sort(key=lambda product: product.shelf_id)
         
@@ -415,7 +456,9 @@ class TaskManager(Node):
         )
         
         if log_msg:
-             self.log_to_central(log_level or "INFO", log_msg)
+             # Only log warning if it's new
+             if not (log_level == "WARN" and order.order_id == last_logged_no_robot_order_id):
+                 self.log_to_central(log_level or "INFO", log_msg)
 
         if best_robot_id:
             # Create a Task message for each product in the order
@@ -438,14 +481,9 @@ class TaskManager(Node):
             drop_off_task = self.get_drop_off_task(best_robot_id, drop_off_pose)
             task_list.append(drop_off_task)
             self.log_to_central("INFO", f"Assigned Order to robot {best_robot_id}: {len(task_list)} tasks")
-            
-            # ILP Logging (Optional - can be moved to allocator or kept here if needed)
-            # keeping here for simplicity as it requires publisher access
+
             task_id_log = f"order_{order.order_id}"
             loc_log = str(order.product_list[0].shelf_id) if order.product_list else ""
-            # Candidates info is hidden inside allocator now, so ILP logging might be less detailed
-            # unless we ask allocator to return candidates. 
-            # For now, simplistic log.
             self.publish_ilp_allocation_event(
                 task_id=task_id_log,
                 assigned_robot=str(best_robot_id),
@@ -454,9 +492,11 @@ class TaskManager(Node):
                 location=loc_log
             )
 
-            return task_list
+            return task_list, last_logged_no_robot_order_id
         else:
-            return None
+            if order.order_id != last_logged_no_robot_order_id:
+                 last_logged_no_robot_order_id = order.order_id
+            return None, last_logged_no_robot_order_id
 
 
     def get_drop_off_task(self, robot_id, drop_off_pose):

@@ -17,6 +17,7 @@ build/
 # Logger logs
 logs/
 published_orders/
+ilp_logs/
 
 # Ignore generated docs
 *.dox

@@ -130,8 +130,6 @@ class FleetManager(Node):
         # Service Server for Task Assignment
         self.create_service(TaskList, 'task_list', self.handle_task_list)
 
-    # execute_order_callback removed as logic is moved to task_manager
-
     def battery_callback(self, msg):
         try:
             updates = json.loads(msg.data)
@@ -268,22 +266,19 @@ class FleetManager(Node):
                 self.log_to_central('WARN', f'Navigation ended with status {status} for {robot_namespace}', robot_namespace, "get_result_callback")
         except Exception as e:
             self.log_to_central('ERROR', f'Failed to get result for {robot_namespace}: {e}', robot_namespace, "get_result_callback")
-        
-        # Set robot back to available regardless of success/failure
+
         self.robots[robot_namespace]["is_available"] = True
-        self.robots[robot_namespace]["status"] = "idle"
-        self.log_to_central('INFO', f'Robot {robot_namespace} is now idle', robot_namespace, "get_result_callback")
+        
+        if result.status == 4:
+             self.robots[robot_namespace]["status"] = "idle"
+             self.log_to_central('INFO', f'Robot {robot_namespace} is now idle', robot_namespace, "get_result_callback")
+        else:
+             self.robots[robot_namespace]["status"] = f"error: navigation failed (code {result.status})"
+             self.log_to_central('WARN', f'Robot {robot_namespace} failed with status {result.status}', robot_namespace, "get_result_callback")
 
 def main(args=None):
     """Initializes the FleetManager node and starts the ROS 2 event loop."""
     rclpy.init(args=args)
-    
-    # Create a temporary node to declare and retrieve parameters
-    # temp_node = rclpy.create_node('temp_node')
-    # temp_node.declare_parameter('num_robots', 2)  # Default value is 2
-    # num_robots = temp_node.get_parameter('num_robots').value
-    # temp_node.destroy_node()
-    
     fleet_manager = FleetManager()
     executor = MultiThreadedExecutor()
     rclpy.spin(fleet_manager, executor=executor)
