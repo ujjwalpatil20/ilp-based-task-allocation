@@ -1,10 +1,9 @@
 #!/bin/bash
 # test_ilp_pipeline.sh
 
-# Get the directory where this script is located
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-WORKSPACE_ROOT="$SCRIPT_DIR/../../../../.."   # Assuming src/task_management/ilp_learning structure
-LOG_DIR="$WORKSPACE_ROOT/ilp_logs"
+# Determine script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="$SCRIPT_DIR/ilp_logs"   # Assuming src/task_management/ilp_learning structure
 
 echo "---------------------------------------------------"
 echo "ILP Optimization Pipeline Test"

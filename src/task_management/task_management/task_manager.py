@@ -116,7 +116,7 @@ class TaskManager(Node):
         
         # Initialize Allocator Strategy
         # Options: HeuristicAllocator(), ILPAllocator()
-        self.allocator = ILPAllocator() # Defaulting to ILP as requested by user context
+        self.allocator = ILPAllocator(self.get_logger()) # Defaulting to ILP as requested by user context
 
 
         # Start the order processing loop in a separate thread
@@ -232,6 +232,7 @@ class TaskManager(Node):
                     order = self.order_queue[0]
                     if order.order_id != last_logged_no_robot_order_id:
                          self.log_to_central("INFO", f'Processing order: {order.order_id}')
+                         self.get_logger().info(f'Processing order: {order.order_id}')
                     
                     # Try to find an available robot
                     robot_fleet_response, shelf_query_response, drop_off_pose = await asyncio.gather(
@@ -481,6 +482,7 @@ class TaskManager(Node):
             drop_off_task = self.get_drop_off_task(best_robot_id, drop_off_pose)
             task_list.append(drop_off_task)
             self.log_to_central("INFO", f"Assigned Order to robot {best_robot_id}: {len(task_list)} tasks")
+            self.get_logger().info(f"Assigned Order to robot {best_robot_id}: {len(task_list)} tasks")
 
             task_id_log = f"order_{order.order_id}"
             loc_log = str(order.product_list[0].shelf_id) if order.product_list else ""

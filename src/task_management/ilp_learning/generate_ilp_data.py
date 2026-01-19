@@ -116,12 +116,22 @@ def generate_popper_files(csv_file, output_dir):
         f.write("\n")
         f.write("\n".join(sorted(neg_exs)))
         print(f"Wrote {len(pos_exs)} pos and {len(neg_exs)} neg examples to {exs_file}")
+        
+    if len(pos_exs) == 0:
+        print("\n[WARNING] No positive examples were generated!")
+        print("Possible causes:")
+        print("1. You are analyzing an old log file (Check the timestamp printed above).")
+        print("2. The 'assigned_robot' in logs does not match any 'candidate_robot'.")
+        print("Recommendation: Run 'ros2 run task_management ilp_dataset_logger', place new orders, and try again.\n")
 
 if __name__ == "__main__":
     # Default paths
-    workspace_root = "/home/ibrahim/ros2_ws"
-    log_dir = os.path.join(workspace_root, "ilp_logs")
+    # workspace_root = "/home/ibrahim/ros2_ws/src/ilp-based-task-allocation"
+    # log_dir = os.path.join(workspace_root, "ilp_logs")
+    
+    # Use script location as anchor
     output_dir = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(output_dir, "ilp_logs")
     
     if len(sys.argv) > 1:
         log_dir = sys.argv[1]

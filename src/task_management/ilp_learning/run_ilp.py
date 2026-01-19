@@ -26,6 +26,22 @@ def run_popper(kb_path):
             # Simple explanation generator based on the found rule
             rule_str = format_prog(prog)
             explain_rule(rule_str)
+            
+            # Save the rule to a file for the allocator to use
+            # We save it in the same directory as this script (ilp_learning)
+            # OR better, one level up in task_management so it's easier to verify
+            # Let's match the plan: save to src/task_management/learned_rules.pl
+            
+            # This script is in src/task_management/ilp_learning
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            parent_dir = os.path.dirname(current_dir)
+            rules_file = os.path.join(parent_dir, 'learned_rules.pl')
+            
+            with open(rules_file, 'w') as f:
+                f.write(f"% Learned from {kb_path}\n")
+                f.write(f":- dynamic assigned/2.\n") 
+                f.write(f"{rule_str}\n")
+            print(f"Saved rule to {rules_file}")
         else:
             print("NO SOLUTION FOUND")
     else:

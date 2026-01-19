@@ -21,6 +21,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/databases', database_files),
+        ('share/' + package_name, ['learned_rules.pl']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
