@@ -89,17 +89,17 @@ class ILPDatasetLogger(Node):
         self.headers = [
             "timestamp",
             "task_id",
-            "task_type",
-            "task_priority",
             "task_location",
-            "assigned_robot",
             "candidate_robot",
+            "assigned_robot",
             "idle",
             "workload",
             "battery",
             "battery_bucket",
             "distance",
             "distance_bucket",
+            "score",
+            "is_chosen",
             "label"
         ]
 
@@ -131,8 +131,6 @@ class ILPDatasetLogger(Node):
 
         task = payload.get("task", {})
         task_id = str(task.get("id", ""))
-        task_type = str(task.get("type", ""))
-        task_priority = str(task.get("priority", ""))
         task_location = str(task.get("location", ""))
 
         assigned_robot = str(payload.get("assigned_robot", ""))
@@ -150,26 +148,32 @@ class ILPDatasetLogger(Node):
 
             bat = float(c.get("battery", -1))
             dist = float(c.get("distance", -1))
+            score = float(c.get("score", 0.0))
 
             bat_b = battery_bucket(bat) if bat >= 0 else ""
             dist_b = distance_bucket(dist) if dist >= 0 else ""
 
-            label = 1 if robot == assigned_robot else 0
+            # Round battery to 2 decimal places
+            if bat >= 0:
+                bat = round(bat, 2)
+
+            is_chosen = (robot == assigned_robot)
+            label = 1 if is_chosen else 0
 
             rows.append([
                 ts,
                 task_id,
-                task_type,
-                task_priority,
                 task_location,
-                assigned_robot,
                 robot,
+                assigned_robot,
                 idle,
                 workload,
                 bat,
                 bat_b,
                 dist,
                 dist_b,
+                score,
+                is_chosen,
                 label
             ])
 

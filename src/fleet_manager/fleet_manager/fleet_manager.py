@@ -181,7 +181,25 @@ class FleetManager(Node):
                 waypoints = self.create_waypoints(request.task_list)
                 self.robots[robot_namespace]["is_available"] = False
                 self.robots[robot_namespace]["status"] = "busy"
-                self.send_goal(robot_namespace, waypoints)
+                
+                # --- SIMULATION MODE: Bypass Navigation ---
+                # Instead of sending a goal, we wait 1 second and then "teleport"
+                self.log_to_central('INFO', f'Simulating task execution for {robot_namespace} (1s delay)...', robot_namespace, "handle_task_list")
+                
+                # Use a one-shot timer to complete the task
+                # We need to capture the final waypoint to "teleport" the robot there
+                def complete_simulated_task():
+                    self.log_to_central('INFO', f'Simulated task complete for {robot_namespace}', robot_namespace, "complete_simulated_task")
+                    self.robots[robot_namespace]["is_available"] = True
+                    self.robots[robot_namespace]["status"] = "idle"
+                    
+                # Store the timer so it doesn't get garbage collected immediately
+                # (using a dynamic attribute name based on robot name)
+                timer_attr = f"sim_timer_{robot_namespace}"
+                setattr(self, timer_attr, self.create_timer(1.0, lambda: [complete_simulated_task(), getattr(self, timer_attr).cancel()]))
+
+                # self.send_goal(robot_namespace, waypoints)
+                
                 response.success = True
                 task_count = len(request.task_list)
                 self.log_to_central('INFO', f'received {task_count} tasks for {robot_namespace}.', robot_namespace, "handle_task_list")

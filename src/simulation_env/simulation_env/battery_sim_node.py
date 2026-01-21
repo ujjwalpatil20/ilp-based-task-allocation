@@ -20,10 +20,10 @@ class BatterySimNode(Node):
         
         self.robots = {}
         # Configuration
-        self.depletion_rate = 0.5 # percent per tick
-        self.charge_rate = 5.0    # percent per tick
-        self.tick_rate = 2.0      # seconds
-        self.low_threshold = 20.0
+        self.depletion_rate = 1.0 # percent per tick
+        self.charge_rate = 4.0    # percent per tick
+        self.tick_rate = 1.0      # seconds
+        self.low_threshold = 10.0
         self.full_threshold = 100.0
 
         # Dynamic robot initialization

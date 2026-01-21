@@ -33,10 +33,9 @@ setup(
     entry_points={
         'console_scripts': [
             'task_manager_node = task_management.task_manager:main',
-            'goal_publisher = task_management.goal_publisher:main',
-            'goal_publisher_1 = task_management.goal_publisher_1:main',
             'data_base = task_management.data_base:main',
             'ilp_dataset_logger = task_management.ilp_dataset_logger:main',
+            'random_order_generator = task_management.random_order_generator:main',
         ],
     },
 )

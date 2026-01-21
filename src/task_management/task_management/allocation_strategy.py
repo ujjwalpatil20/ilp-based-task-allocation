@@ -20,44 +20,84 @@ class AllocationStrategy:
         """
         raise NotImplementedError("Subclasses must implement select_best_robot")
 
+    def on_task_completion(self, robot_id):
+        """
+        Callback when a task is completed.
+        """
+        pass
+
 
 class HeuristicAllocator(AllocationStrategy):
     """
     Allocates tasks to robots based on proximity to shelves and battery level.
     """
+    def __init__(self, logger=None):
+        self.logger = logger
+
     def select_best_robot(self, robot_fleet_list, shelf_details, order, assigned_robots):
         best_robot_id = None
         best_score = -1
+        candidates = []
         
         # Ensure we have products to check
         if not order.product_list:
-             return None, "Order has no products.", "WARN"
+             return None, "Order has no products.", "WARN", []
 
         # Use the first product's shelf for distance calculation
-        # Note: The order's product list should be sorted by preference/shelf_id before calling this, 
-        # or we assume the first one is the target for heuristic.
+        # Note: The order's product list should be sorted by preference/shelf_id before calling this.
         first_product_shelf_id = order.product_list[0].shelf_id
         target_shelf = next((s for s in shelf_details if s.shelf_id == first_product_shelf_id), None)
 
         if not target_shelf:
-            return None, f"Shelf {first_product_shelf_id} not found.", "WARN"
+            return None, f"Shelf {first_product_shelf_id} not found.", "WARN", []
 
         shelf_location = target_shelf.shelf_location
 
         found_candidate = False
         
         for robot in robot_fleet_list:
-            # Check both shared_memory status AND local tracking
-            if robot.is_available and robot.robot_id not in assigned_robots:
-                found_candidate = True
-                robot_location = robot.current_location
-                distance = self._calculate_distance(robot_location, shelf_location)
-                battery_score = robot.battery_level
-                
-                # Combined score (lower distance and higher battery are better)
-                # Adding 1 to distance to avoid division by zero
-                score = (1 / (distance + 1)) * battery_score
+            # Determine effective availability:
+            # Must be available in FleetManager AND not locked locally
+            is_effectively_idle = robot.is_available and (robot.robot_id not in assigned_robots)
 
+            # Calculate metrics for all active robots (for logging stats)
+            robot_location = robot.current_location
+            distance = self._calculate_distance(robot_location, shelf_location)
+            battery_score = float(robot.battery_level)
+            
+            # Calculate heuristic score for all candidates
+            # (1 / (distance + 1)) * battery_score
+            score = (1 / (distance + 1)) * battery_score
+
+            # Bucket logic (matching ILPAllocator for consistent dataset)
+            bat_b = "high"
+            if battery_score < 0.30: bat_b = "low"
+            elif battery_score < 0.60: bat_b = "medium"
+            
+            dist_b = "far"
+            if distance <= 3.0: dist_b = "near"
+            elif distance <= 7.0: dist_b = "medium"
+            
+            # Heuristic currently doesn't track workload history, default to zero
+            wl_b = "zero" 
+            workload = 0
+            
+            candidates.append({
+                "robot": robot.robot_id,
+                "battery": battery_score,
+                "distance": distance,
+                "workload": workload,
+                "idle": is_effectively_idle,
+                "battery_bucket": bat_b,
+                "distance_bucket": dist_b,
+                "workload_bucket": wl_b,
+                "score": score
+            })
+
+            # Check for availability for actual assignment
+            if is_effectively_idle:
+                found_candidate = True
+                
                 if score > best_score:
                     best_score = score
                     best_robot_id = robot.robot_id
@@ -65,13 +105,13 @@ class HeuristicAllocator(AllocationStrategy):
         if best_robot_id is None:
              if found_candidate:
                  # Robots were available but somehow score didn't pick one? 
-                 # With logic above, this theoretically shouldn't happen if found_candidate is true 
-                 # unless best_score stays -1 (which it starts at).
-                 # score will always be > 0.
                  pass
-             return None, "No available robots to assign task.", "WARN", []
+             return None, "No available robots to assign task.", "WARN", candidates
              
-        return best_robot_id, None, None, []
+        return best_robot_id, None, None, candidates
+
+    def on_task_completion(self, robot_id):
+        pass
 
     def _calculate_distance(self, location1: Pose, location2: Pose):
         return math.sqrt(
@@ -280,6 +320,9 @@ class ILPAllocator(AllocationStrategy):
             wl_b = "zero"
             if self.robot_workload[r['id']] > 0: wl_b = "low"
             
+            # Add heuristic score for comparison/logging
+            score = (1 / (r["dist"] + 1)) * r["bat"]
+            
             final_candidates.append({
                 "robot": r["id"],
                 "battery": r["bat"],
@@ -288,7 +331,8 @@ class ILPAllocator(AllocationStrategy):
                 "idle": r["idle"],
                 "battery_bucket": bat_b,
                 "distance_bucket": dist_b,
-                "workload_bucket": wl_b
+                "workload_bucket": wl_b,
+                "score": score
             })
             
         return best_id, final_candidates

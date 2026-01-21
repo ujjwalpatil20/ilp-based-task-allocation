@@ -79,6 +79,11 @@ import csv
 import time
 import webbrowser
 import os
+import logging
+
+# Suppress Flask/Werkzeug request logs
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 # Determine template directory - use share directory if installed, else local
 def get_template_directory():
