@@ -1,102 +1,118 @@
-# ILP Based Task Distribution System
+# ILP-Based Task Allocation System
 
-This project implements a multi-robot task distribution system designed for warehouse automation, enhanced with Induction Logic Programming (ILP) concepts for intelligent task allocation.
+This project implements a multi-robot task distribution system designed for warehouse automation. It features a unique **Inductive Logic Programming (ILP)** component that learns task allocation strategies from historical data, allowing the system to adapt its behavior (e.g., favoring closest robots vs. robots with high battery) based on successful past assignments.
 
-### For details about the core architecture and node documentation, please refer to the original repository:
-[Original Repository README](https://github.com/HBRS-SDP/ws24-multi-robot-task-distribution/blob/8c7dc51ea050e1eed7ebb6f6c8ebd692007cface/README.md)
+## Features
 
----
-
-## ILP Process & Task Allocation
-
-The core of this fork is the integration of an ILP-inspired hybrid allocation strategy. The system evaluates the fleet state in real-time and applies a 3-step priority logic to ensure both efficiency and fleet health.
-
-### 3-Step Hybrid Logic:
-1.  **Overwork Prevention**: Robots with a current workload higher than a specific threshold are deprioritized to prevent mechanical strain and ensure load balancing.
-2.  **Survival Mode (Battery Priority)**: If a robot's battery level drops below 40%, it enters a "Survival Mode" where battery level becomes the primary metric for assignment, ensuring robots don't die in the field.
-3.  **Efficiency Mode (Proximity Priority)**: Under normal conditions, the system defaults to Efficiency Mode, selecting the closest available robot to the target shelf to minimize travel time.
-
-### Data Logging for ILP Training:
-The system includes an `ILPDatasetLogger` that captures all allocation events. Each log entry includes:
-- Robot proximity to the task.
-- Battery levels.
-- Current workloads.
-- The final assignment decision.
-This dataset can be used to further train and refine the logic using ILP solvers like Popper.
+*   **Multi-Robot Simulation**: Simulates a warehouse environment with multiple robots using ROS2 and Gazebo.
+*   **ILP-Based Allocation**: Uses **Popper** (an ILP system) to learn logic rules from logs.
+*   **Robust Fallback**: Automatically switches to a heuristic strategy if ILP rules are unavailable or fail.
+*   **Web Dashboard**: A real-time interface to submit orders and view robot status.
+*   **Automated Pipeline**: Tools to process logs, generate Prolog facts, and train new rules.
 
 ---
 
-## Installation and Project Setup
+## Installation
 
 ### Prerequisites
-- ROS2 Humble
-- Git
-- Python 3
+*   Ubuntu 22.04 (Jammy)
+*   ROS2 Humble
+*   Python 3.10+
+*   [Popper](https://github.com/logic-and-learning-lab/Popper) (Validation required)
+*   SWI-Prolog (`swi-prolog`)
 
-### 1. Create a ROS Workspace
+### 1. Create Workspace
 ```bash
-mkdir -p ~/ros_ws/src
-cd ~/ros_ws/
-colcon build
-source install/setup.bash
-```
-
-### 2. Clone the Package
-```bash
-cd ~/ros_ws/src
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
 git clone https://github.com/ujjwalpatil20/ilp-based-task-allocation.git
 ```
 
-### 3. Install Dependencies
+### 2. Install Dependencies
 ```bash
-cd ~/ros_ws
+cd ~/ros2_ws
 rosdep install --from-paths src --ignore-src -r -y
-pip install flask
+pip install flask popper-ilp janus-swi
 ```
 
-### 4. Build the Package
+### 3. Build
 ```bash
 colcon build --symlink-install
+source install/setup.bash
 ```
 
 ---
 
-## Launching the System
+## Running the System
 
-### 1. Source the Workspace
-```bash
-source ~/ros_ws/install/setup.bash
-```
+To run the simulation and the task management system, you will need two terminals.
 
-### 2. Set the Number of Robots
+### Terminal 1: Simulation Environment
+Sets up the Gazebo world, robot models, and navigation stack.
 ```bash
-export NUM_OF_ROBOTS=2  # Default is 2
-```
-
-### 3. Launch the Simulation Environment
-```bash
+source install/setup.bash
+export NUM_OF_ROBOTS=2  # Set the desired number of robots
 ros2 launch simulation_env sim_with_nav.launch.py
 ```
 
-### 4. Launch the Warehouse Manager
-This launches the Task Manager, Fleet Manager, Shared Memory, and the Web GUI.
+### Terminal 2: Warehouse Manager
+Launches the Task Manager, Fleet Manager, and Web Server.
 ```bash
+source install/setup.bash
+export NUM_OF_ROBOTS=2
 ros2 launch simulation_env warehouse_manager.launch.py
 ```
 
-### 5. Access the Web Client
-The GUI will auto-launch or be accessible at: `http://localhost:5000`
+**Access the Web Dashboard** at `http://localhost:5000` to submit orders.
 
 ---
 
-## Workflow Summary
-1. **Order Placement**: Users submit orders via the Web GUI.
-2. **Task Evaluation**: The Task manager uses the `ILPAllocator` to score available robots based on Workload, Battery, and Distance.
-3. **Task Assignment**: The highest-scoring robot is assigned the task via the Fleet Manager.
-4. **Execution**: The robot navigates through waypoints (Shelves -> Drop-off).
-5. **Completion**: Once "Idle" status is confirmed, the order is marked complete and the robot's workload is decremented.
+## ILP Learning Pipeline
+
+The unique feature of this project is its ability to learn allocation rules. Here is how the training works.
+
+### 1. Data Collection (Logging)
+The system automatically logs every allocation attempt to `src/task_management/ilp_learning/ilp_logs/`.
+The log captures:
+*   Robot distances to target.
+*   Battery levels.
+*   Workload.
+*   Whether the assignment was successful.
+
+### 2. Learning Process
+You can retrain the system using the provided scripts. This process converts logs into Logic Programming (Prolog) facts and uses the Popper ILP engine to find a rule that explains the data.
+
+**Run the Full Pipeline:**
+```bash
+cd src/task_management/ilp_learning
+./test_ilp_pipeline.sh
+```
+
+**What this script does:**
+1.  **`generate_ilp_data.py`**: Reads the latest CSV log files and generates two Prolog files:
+    *   `bk.pl` (Background Knowledge): Static facts and helper predicates.
+    *   `exs.pl` (Examples): Positive and negative examples derived from the logs (e.g., `pos(assigned(task1, robot_1))`).
+2.  **`run_ilp.py`**: Invokes the **Popper** library using the generated files and `bias.pl` (Language Bias).
+3.  **Result**: If a rule is found (e.g., `assigned(T, R) :- ...`), it is saved to `src/task_management/learned_rules.pl`.
+
+### 3. Using Learned Rules
+The `ILPAllocator` class in `allocation_strategy.py` automatically checks for `src/task_management/learned_rules.pl`.
+*   If found, it loads the rule using `janus_swi` (Python-Prolog bridge) and uses it to decide which robot gets the task.
+*   If not found (or if the rule fails), it gracefully falls back to the hardcoded `HeuristicAllocator`.
+
+---
+
+## Directory Structure
+
+*   `src/simulation_env`: Launch files, world maps, and navigation configs.
+*   `src/task_management`: Core logic nodes.
+    *   `allocation_strategy.py`: The brain that decides which robot picks an order.
+    *   `ilp_learning/`: The "Machine Learning" studio.
+        *   `bk.pl`, `bias.pl`: Prolog templates for learning.
+        *   `run_ilp.py`: The trainer script.
+*   `src/fleet_manager`: Handles low-level robot control and status updates.
 
 ---
 
 ## License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT License

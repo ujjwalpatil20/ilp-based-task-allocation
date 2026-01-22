@@ -180,13 +180,13 @@ class ILPAllocator(AllocationStrategy):
         self.heuristic_fallback = HeuristicAllocator()
         
     def _log(self, level, msg):
-        # Always print to stdout with flush=True to ensure visibility in all environments
-        print(f"[{level}] {msg}", flush=True)
-        # Also log to ROS logger if available
+        # Log to ROS logger if available, otherwise print to stdout
         if self.logger:
             if level == "INFO": self.logger.info(msg)
             elif level == "WARN": self.logger.warn(msg)
             elif level == "ERROR": self.logger.error(msg)
+        else:
+            print(f"[{level}] {msg}", flush=True)
 
     def select_best_robot(self, robot_fleet_list, shelf_details, order, assigned_robots):
         if self.use_ilp:
