@@ -236,64 +236,102 @@ class ILPAllocator(AllocationStrategy):
         min_dist = float('inf')
         max_bat = -1.0
         
+        # FIRST PASS: Calculate Global Stats across ALL robots
+        # (This matches the new training logic where 'closest' is global)
         for robot in robot_fleet_list:
-             if robot.robot_id in assigned_robots: continue
-             
              dist = self._calculate_distance(robot.current_location, shelf_location)
              bat = float(robot.battery_level)
              
+             if dist < min_dist: min_dist = dist
+             if bat > max_bat: max_bat = bat
+
+        # Calculates stats for idle robots
+        min_dist_idle = float('inf')
+        max_bat_idle = -1.0
+        
+        for robot in robot_fleet_list:
+             is_busy = (robot.robot_id in assigned_robots) or (not robot.is_available)
+             if not is_busy:
+                 dist = self._calculate_distance(robot.current_location, shelf_location)
+                 bat = float(robot.battery_level)
+                 if dist < min_dist_idle: min_dist_idle = dist
+                 if bat > max_bat_idle: max_bat_idle = bat
+
+        # SECOND PASS: Build Facts
+        for robot in robot_fleet_list:
+             # We assume robots in assigned_robots are "busy" logic-wise
+             # availability also comes from robot.is_available
+             
+             dist = self._calculate_distance(robot.current_location, shelf_location)
+             bat = float(robot.battery_level)
+             is_busy = (robot.robot_id in assigned_robots) or (not robot.is_available)
+             is_idle = not is_busy
+
              active_robots.append({
                  "id": robot.robot_id,
                  "dist": dist,
                  "bat": bat,
-                 "idle": robot.is_available
+                 "idle": is_idle
              })
-             
-             if robot.is_available:
-                 if dist < min_dist: min_dist = dist
-                 if bat > max_bat: max_bat = bat
 
-        for r in active_robots:
-            rid = f"robot_{r['id']}"
+             rid = f"robot_{robot.robot_id}"
             
-            # Buckets
-            bat_b = "high"
-            if r["bat"] < 0.30: bat_b = "low"
-            elif r["bat"] < 0.60: bat_b = "medium"
+             # Buckets
+             bat_b = "high"
+             if bat < 0.30: bat_b = "low"
+             elif bat < 0.60: bat_b = "medium"
             
-            dist_b = "far"
-            if r["dist"] <= 3.0: dist_b = "near"
-            elif r["dist"] <= 7.0: dist_b = "medium"
+             dist_b = "far"
+             if dist <= 3.0: dist_b = "near"
+             elif dist <= 7.0: dist_b = "medium"
             
-            wl_b = "zero"
-            if self.robot_workload[r['id']] > 0: wl_b = "low"
-
+             wl_b = "zero"
+             if self.robot_workload[robot.robot_id] > 0: wl_b = "low"
             
-            facts_to_assert.append(f"battery_bucket({task_id}, {rid}, {bat_b})")
-            facts_to_assert.append(f"distance_bucket({task_id}, {rid}, {dist_b})")
-            facts_to_assert.append(f"workload_bucket({task_id}, {rid}, {wl_b})")
+             facts_to_assert.append(f"battery_bucket({task_id}, {rid}, {bat_b})")
+             facts_to_assert.append(f"distance_bucket({task_id}, {rid}, {dist_b})")
+             facts_to_assert.append(f"workload_bucket({task_id}, {rid}, {wl_b})")
             
-            if r["idle"]:
+             if is_idle:
                 facts_to_assert.append(f"idle({task_id}, {rid})")
-                if r["dist"] <= min_dist + 0.01:
-                    facts_to_assert.append(f"closest({task_id}, {rid})")
-                if r["bat"] >= max_bat - 0.01:
-                    facts_to_assert.append(f"most_charged({task_id}, {rid})")
-            else:
+             else:
                 facts_to_assert.append(f"busy({task_id}, {rid})")
+                
+             # Comparative Facts (Global comparison)
+             if dist <= min_dist + 0.01:
+                 facts_to_assert.append(f"closest({task_id}, {rid})")
+             if bat >= max_bat - 0.01:
+                 facts_to_assert.append(f"most_charged({task_id}, {rid})")
+                 
+             if is_idle:
+                 if dist <= min_dist_idle + 0.01:
+                     facts_to_assert.append(f"closest_idle({task_id}, {rid})")
+                 if bat >= max_bat_idle - 0.01:
+                     facts_to_assert.append(f"most_charged_idle({task_id}, {rid})")
 
         # 3. Assert & Query
+        self._log("INFO", f"--- ILP Step: Allocating Task (Global Context) ---")
         for f in facts_to_assert:
             self.janus.query_once(f"assertz({f})")
+            # LOGGING: Show what the system "sees"
+            if "closest" in f or "most_charged" in f or "idle" in f or "busy" in f:
+                 self._log("INFO", f"  [FACT] {f}")
             
         q = f"assigned({task_id}, RobotArg)"
         best_id = None
         try:
             result = self.janus.query_once(q)
+            self._log("INFO", f"  [QUERY] {q}  -> result: {result}")
+            
             if result:
                 robot_val = result.get('RobotArg')
                 if robot_val and isinstance(robot_val, str) and robot_val.startswith("robot_"):
                     best_id = int(robot_val.split("_")[1])
+                    self._log("INFO", f"  [DECISION] ILP selected Robot {best_id}")
+                else:
+                    self._log("INFO", f"  [DECISION] ILP returned result but no valid robot ID: {robot_val}")
+            else:
+                 self._log("INFO", f"  [DECISION] ILP found NO solution.")
         finally:
             # 4. Cleanup (Always retract)
             self.janus.query_once(f"retractall(battery_bucket({task_id}, _, _))")
@@ -303,6 +341,8 @@ class ILPAllocator(AllocationStrategy):
             self.janus.query_once(f"retractall(busy({task_id}, _))")
             self.janus.query_once(f"retractall(closest({task_id}, _))")
             self.janus.query_once(f"retractall(most_charged({task_id}, _))")
+            self.janus.query_once(f"retractall(closest_idle({task_id}, _))")
+            self.janus.query_once(f"retractall(most_charged_idle({task_id}, _))")
             
         # Reformat candidates for logger
         # Keys needed: candidate_robot, idle, workload, battery, distance, battery_bucket, distance_bucket

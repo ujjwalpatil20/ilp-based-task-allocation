@@ -116,7 +116,9 @@ class TaskManager(Node):
         
         # Initialize Allocator Strategy
         # Options: HeuristicAllocator(), ILPAllocator()
-        self.allocator = HeuristicAllocator(self.get_logger()) # Defaulting to ILP as requested by user context
+        # Initialize Allocator Strategy
+        # Options: HeuristicAllocator(), ILPAllocator()
+        self.allocator = ILPAllocator(self.get_logger()) # Enabled ILP based on learned rules
 
 
         # Start the order processing loop in a separate thread

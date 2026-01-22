@@ -43,15 +43,16 @@ def generate_popper_files(csv_file, output_dir):
         clean_task_id = original_task_id.lower().replace('-', '_')
         task_id = f"{clean_task_id}_evt{event_counter}"
         
-        # Find best stats AMONG IDLE ROBOTS
-        idle_rows = [r for r in rows if r['idle'].lower() == 'true']
+        # Find best stats AMONG ALL ROBOTS
+        # idle_rows = [r for r in rows if r['idle'].lower() == 'true']
         
+        # Determine global min/max for this task event
         min_dist = float('inf')
         max_bat = -1.0
         
-        if idle_rows:
-            min_dist = min(float(r['distance']) for r in idle_rows)
-            max_bat = max(float(r['battery']) for r in idle_rows)
+        if rows:
+            min_dist = min(float(r['distance']) for r in rows)
+            max_bat = max(float(r['battery']) for r in rows)
         
         for row in rows:
             robot_id = f"robot_{row['candidate_robot']}"
@@ -88,13 +89,12 @@ def generate_popper_files(csv_file, output_dir):
             else:
                 facts.add(f"busy({task_id}, {robot_id}).")
             
-            # Comparative Facts (only if idle)
-            if is_idle:
-                 if dist <= min_dist + 0.01:
-                     facts.add(f"closest({task_id}, {robot_id}).")
-            
-                 if bat >= max_bat - 0.01:
-                     facts.add(f"most_charged({task_id}, {robot_id}).")
+            # Comparative Facts (Global comparison)
+            if dist <= min_dist + 0.01:
+                facts.add(f"closest({task_id}, {robot_id}).")
+    
+            if bat >= max_bat - 0.01:
+                facts.add(f"most_charged({task_id}, {robot_id}).")
 
             # Examples
             # assigned(Task, Robot)

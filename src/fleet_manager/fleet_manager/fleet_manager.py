@@ -129,6 +129,9 @@ class FleetManager(Node):
 
         # Service Server for Task Assignment
         self.create_service(TaskList, 'task_list', self.handle_task_list)
+        
+        # Task Queues: {robot_namespace: [list_of_waypoints]}
+        self.task_queues = {}
 
     def battery_callback(self, msg):
         try:
@@ -174,31 +177,35 @@ class FleetManager(Node):
             if request.task_list:
                 robot_id = request.task_list[0].robot_id
                 robot_namespace = f'robot_{robot_id}'
+                waypoints = self.create_waypoints(request.task_list)
+
                 if not self.robots[robot_namespace]["is_available"]:
-                    response.success = False
+                    self.get_logger().info(f"Robot {robot_namespace} is busy. Queuing tasks.")
+                    if robot_namespace not in self.task_queues:
+                        self.task_queues[robot_namespace] = []
+                    self.task_queues[robot_namespace].append(waypoints)
+                    response.success = True
                     return response
 
-                waypoints = self.create_waypoints(request.task_list)
                 self.robots[robot_namespace]["is_available"] = False
                 self.robots[robot_namespace]["status"] = "busy"
                 
                 # --- SIMULATION MODE: Bypass Navigation ---
                 # Instead of sending a goal, we wait 1 second and then "teleport"
-                self.log_to_central('INFO', f'Simulating task execution for {robot_namespace} (1s delay)...', robot_namespace, "handle_task_list")
+                # self.log_to_central('INFO', f'Simulating task execution for {robot_namespace} (1s delay)...', robot_namespace, "handle_task_list")
                 
                 # Use a one-shot timer to complete the task
                 # We need to capture the final waypoint to "teleport" the robot there
                 def complete_simulated_task():
                     self.log_to_central('INFO', f'Simulated task complete for {robot_namespace}', robot_namespace, "complete_simulated_task")
-                    self.robots[robot_namespace]["is_available"] = True
-                    self.robots[robot_namespace]["status"] = "idle"
+                    self._process_next_task(robot_namespace)
                     
                 # Store the timer so it doesn't get garbage collected immediately
                 # (using a dynamic attribute name based on robot name)
                 timer_attr = f"sim_timer_{robot_namespace}"
                 setattr(self, timer_attr, self.create_timer(1.0, lambda: [complete_simulated_task(), getattr(self, timer_attr).cancel()]))
 
-                # self.send_goal(robot_namespace, waypoints)
+                self.send_goal(robot_namespace, waypoints)
                 
                 response.success = True
                 task_count = len(request.task_list)
@@ -285,14 +292,33 @@ class FleetManager(Node):
         except Exception as e:
             self.log_to_central('ERROR', f'Failed to get result for {robot_namespace}: {e}', robot_namespace, "get_result_callback")
 
-        self.robots[robot_namespace]["is_available"] = True
-        
         if result.status == 4:
-             self.robots[robot_namespace]["status"] = "idle"
-             self.log_to_central('INFO', f'Robot {robot_namespace} is now idle', robot_namespace, "get_result_callback")
+             self.log_to_central('INFO', f'Navigation completed for {robot_namespace}', robot_namespace, "get_result_callback")
+             self._process_next_task(robot_namespace)
         else:
              self.robots[robot_namespace]["status"] = f"error: navigation failed (code {result.status})"
-             self.log_to_central('WARN', f'Robot {robot_namespace} failed with status {result.status}', robot_namespace, "get_result_callback")
+             self.robots[robot_namespace]["is_available"] = True
+
+    def _process_next_task(self, robot_namespace):
+        """Dequeues and processes the next task for the robot, or sets it to idle."""
+        if robot_namespace in self.task_queues and self.task_queues[robot_namespace]:
+            next_waypoints = self.task_queues[robot_namespace].pop(0)
+            self.send_goal(robot_namespace, next_waypoints)
+            self.robots[robot_namespace]["status"] = "busy"
+            self.log_to_central('INFO', f'Dequeued next task for {robot_namespace}', robot_namespace, "_process_next_task")
+            
+            # Re-trigger simulation timer if needed (since handle_task_list isn't called)
+            # This is a bit hacky but preserves the dual-mode behavior
+            timer_attr = f"sim_timer_{robot_namespace}"
+            def complete_simulated_task():
+                self.log_to_central('INFO', f'Simulated task complete for {robot_namespace}', robot_namespace, "complete_simulated_task")
+                self._process_next_task(robot_namespace)
+
+            setattr(self, timer_attr, self.create_timer(1.0, lambda: [complete_simulated_task(), getattr(self, timer_attr).cancel()]))
+        else:
+            self.robots[robot_namespace]["status"] = "idle"
+            self.robots[robot_namespace]["is_available"] = True
+            self.log_to_central('INFO', f'Robot {robot_namespace} is now idle (Queue Empty)', robot_namespace, "_process_next_task")
 
 def main(args=None):
     """Initializes the FleetManager node and starts the ROS 2 event loop."""
